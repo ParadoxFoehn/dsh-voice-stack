@@ -1,0 +1,26 @@
+# models / venvs / runtime output are never committed
+models/
+third_party/
+.venv-asr/
+.venv-tts/
+tts/out/
+shared_voice/
+logs/
+assets/prompt.wav
+config/config.json
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# audio scratch files
+*.wav.part
+*.mp3.part

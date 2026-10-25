@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 先看故障排查
+    url: https://github.com/ParadoxFoehn/dsh-voice-stack/blob/main/docs/troubleshooting.md
+    about: 大部分问题（OOM、播放器不显示、没有声音、torch 版本）这里都有答案

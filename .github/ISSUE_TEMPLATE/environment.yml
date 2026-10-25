@@ -1,0 +1,49 @@
+name: Environment / 装不上、跑不起来
+description: Report a setup problem (please include the three outputs below)
+title: "[env] "
+labels: ["environment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先确认你读过 README 的"先别装在你的工作机上"一节，并且是在沙箱/虚拟机里试的。
+        下面三项是最关键的诊断信息，缺了很难定位。
+  - type: textarea
+    id: gpu
+    attributes:
+      label: nvidia-smi
+      description: 运行 `nvidia-smi` 的完整输出（没有独显就写"无独显"）
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: python
+    attributes:
+      label: python / ffmpeg
+      description: `python -V` 与 `ffmpeg -version` 的第一行
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: verify.ps1 输出
+      description: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1` 的完整输出
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志尾部
+      description: `logs\*.log` 的最后 30 行（没有 logs 目录就跳过）
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本
+      placeholder: 例如 Windows 11 23H2
+    validations:
+      required: true

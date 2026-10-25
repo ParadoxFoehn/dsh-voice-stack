@@ -1,0 +1,10 @@
+- insert:
+    - id: voice-player
+      name: '@local/dsh-voice-player'
+      config:
+        # Absolute path of this repository on the user's machine, e.g. "D:\\dsh-voice-stack".
+        # Only used to start the TTS service on demand when it is not running yet.
+        # Leave it empty to rely on the SAPI fallback.
+        stackDir: ''
+        ttsPort: 18081
+        sapiPort: 18080
