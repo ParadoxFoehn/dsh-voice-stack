@@ -1,0 +1,16 @@
+models/
+third_party/
+.venv-asr/
+.venv-tts/
+tts/out/
+shared_voice/
+logs/
+assets/prompt.wav
+config/config.json
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
