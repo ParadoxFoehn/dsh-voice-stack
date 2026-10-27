@@ -1,41 +1,15 @@
-r"""say.py -- one-shot TTS with CosyVoice2 (speaker "me", seeded from a prompt wav).
+r"""say.py -- local TTS with CosyVoice2 (fixed speaker "me", seeded from a prompt wav).
 
-For a single sentence this is enough, but every run reloads the model (~15 s).
-For chat use, run tts_server.py instead: it keeps the model resident.
-
-    .venv-tts\Scripts\python.exe tts\say.py --text "..." --out tts\out\a.mp3
+Run through the ASCII paths only (D:\py-tts, D:\py-asr):
+    D:\py-asr\.venv\Scripts\python.exe D:\py-tts\say.py --text "..." --out D:\py-tts\out\a.mp3
 """
 import argparse
-import json
 import os
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
-
-
-def _load_config():
-    path = os.environ.get("DSH_VOICE_CONFIG") or os.path.join(REPO, "config", "config.json")
-    if not os.path.isfile(path):
-        path = os.path.join(REPO, "config", "config.example.json")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
-
-CFG = _load_config()
-
-
-def _p(value):
-    if not value:
-        return ""
-    return value if os.path.isabs(value) else os.path.join(REPO, value)
-
-
-sys.path.insert(0, _p(CFG["paths"]["cosyvoice_code"]))
-sys.path.insert(0, _p(CFG["paths"]["matcha_code"]))
+sys.path.insert(0, r"D:\py-tts\CosyVoice-2.0")
+sys.path.insert(0, r"D:\py-tts\third_party\Matcha-TTS-main")
 
 from cosyvoice.cli.cosyvoice import CosyVoice2  # noqa: E402
 import soundfile as sf  # noqa: E402
@@ -60,16 +34,16 @@ def save_wav(path, audio, sr):
         arr = arr[0]
     sf.write(path, arr, sr)
 
-DEF_MODEL = _p(CFG["paths"]["cosyvoice_model"])
-DEF_PROMPT = _p(CFG["paths"]["prompt_wav"])
-DEF_PROMPT_TEXT = CFG.get("prompt_text", "希望你以后能够做的比我还好呦。")
+DEF_MODEL = r"D:\py-tts\models\CosyVoice2-0.5B"
+DEF_PROMPT = r"D:\py-tts\assets\prompt.wav"
+DEF_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
 SPK_ID = "me"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--text", required=True)
-    ap.add_argument("--out", default=os.path.join(HERE, "out", "say.mp3"))
+    ap.add_argument("--out", default=r"D:\py-tts\out\say.mp3")
     ap.add_argument("--model", default=DEF_MODEL)
     ap.add_argument("--prompt", default=DEF_PROMPT)
     ap.add_argument("--prompt-text", default=DEF_PROMPT_TEXT)
@@ -99,7 +73,7 @@ def main():
         sys.stderr.write("[say] no audio produced\n")
         return 2
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-codec:a", "libmp3lame", "-b:a", "96k", a.out],
-                   check=True, capture_output=True, creationflags=NO_WINDOW)
+                   check=True)
     try:
         os.remove(wav)
     except OSError:

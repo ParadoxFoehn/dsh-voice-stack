@@ -2,7 +2,9 @@
   "_comment": "Copy to config.json (scripts/install.ps1 does it) and fix the paths. Relative paths are resolved against the repo root. Absolute paths work too.",
   "ports": {
     "asr": 18080,
-    "tts": 18081
+    "tts": 18081,
+    "tts_qwen": 18082,
+    "asr_fast": 18083
   },
   "paths": {
     "asr_model": "models/Qwen3-ASR-1.7B",
@@ -10,7 +12,11 @@
     "cosyvoice_code": "third_party/CosyVoice-2.0",
     "matcha_code": "third_party/Matcha-TTS",
     "prompt_wav": "assets/prompt.wav",
-    "voice_share_dir": "shared_voice"
+    "voice_share_dir": "shared_voice",
+    "asr_fast_model": "models/Qwen3-ASR-0.6B",
+    "qwen_tts_base": "models/Qwen3-TTS-12Hz-0.6B-Base",
+    "qwen_tts_design": "models/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    "voice_ref_wav": "assets/voice-me.wav"
   },
   "prompt_text": "希望你以后能够做的比我还好呦。",
   "verify_text": "这是验证用的句子，如果你能听见它，说明一切都对。",
@@ -18,5 +24,12 @@
   "python": {
     "asr": ".venv-asr/Scripts/python.exe",
     "tts": ".venv-tts/Scripts/python.exe"
+  },
+  "qwen_tts": {
+    "_comment": "mode=clone speaks with the 0.6B Base using your own reference clip; mode=design uses the 1.7B VoiceDesign. Design once, then clone.",
+    "mode": "clone",
+    "instruct": "年轻的女声，音色清亮但柔和，语气温和亲近，语速中等，句尾轻轻收住，带一点笑意，不要播音腔。",
+    "ref_wav": "assets/voice-me.wav",
+    "ref_text": "这个声音定下来了。以后我说话，就是这个嗓子。"
   }
 }

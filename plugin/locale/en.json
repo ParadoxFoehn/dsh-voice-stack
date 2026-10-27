@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Voice Player",
-    "description": "Plays locally synthesized speech inside the chat, right under the composer."
+    "title": "Voice Messages (record & play)",
+    "description": "Record a voice message with the waveform button on the left of the composer (the audio itself is sent, not a transcript) and play the assistant's spoken replies."
   }
 }

@@ -1,18 +1,23 @@
 @echo off
-rem ===========================================================================
-rem  asr\asr-server.cmd -- Qwen3-ASR endpoint on 127.0.0.1:18080. It also serves
-rem  /voice/* and /player, which the chat uses to play spoken replies.
-rem  ASCII ONLY. Override the interpreter with DSH_VOICE_PY_ASR.
-rem ===========================================================================
+rem ============================================================================
+rem dsh-tools\py-asr\asr-server.cmd -- OpenAI-compatible transcription endpoint.
+rem
+rem WHY: voice-input plugins can point at any /audio/transcriptions endpoint;
+rem      this serves the local Qwen3-ASR model on 127.0.0.1:18080.
+rem
+rem NOTES
+rem   * Uses the ASCII junction D:\py-asr (nagisa cannot open non-ASCII paths).
+rem   * Keep this file PURE ASCII.
+rem   * Health check: curl.exe -s http://127.0.0.1:18080/health
+rem ============================================================================
 setlocal
 set "HERE=%~dp0"
-set "ROOT=%HERE%.."
-set "PY=%DSH_VOICE_PY_ASR%"
-if "%PY%"=="" set "PY=%ROOT%\.venv-asr\Scripts\python.exe"
+set "ASCII_ROOT=D:\py-asr"
+set "PY=%ASCII_ROOT%\.venv\Scripts\python.exe"
+set "SCRIPT=%ASCII_ROOT%\asr_server.py"
 if not exist "%PY%" (
-  echo [asr] python not found: %PY%
-  echo [asr] run scripts\install.ps1 first, or set DSH_VOICE_PY_ASR
-  exit /b 2
+  set "PY=%HERE%.venv\Scripts\python.exe"
+  set "SCRIPT=%HERE%asr_server.py"
 )
-"%PY%" "%HERE%asr_server.py" %*
+"%PY%" "%SCRIPT%" %*
 exit /b %errorlevel%

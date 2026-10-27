@@ -1,0 +1,10 @@
+{
+    "status":  "ok",
+    "findings":  [
+
+                 ],
+    "action":  [
+                   "PREFLIGHT: report write failed",
+                   "proceed"
+               ]
+}

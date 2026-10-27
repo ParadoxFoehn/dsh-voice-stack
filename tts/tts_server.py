@@ -19,47 +19,24 @@ import shutil
 import subprocess
 import sys
 import threading
-import json
 import time
 
-# Never flash a console window for helper processes.
+# Never flash a console window for helper processes (user complaint 2026-10-24).
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
-
-
-def _load_config():
-    """config/config.json (written by scripts/install.ps1), else the shipped example."""
-    path = os.environ.get("DSH_VOICE_CONFIG") or os.path.join(REPO, "config", "config.json")
-    if not os.path.isfile(path):
-        path = os.path.join(REPO, "config", "config.example.json")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-CFG = _load_config()
-
-
-def _p(value):
-    if not value:
-        return ""
-    return value if os.path.isabs(value) else os.path.join(REPO, value)
-
-
-sys.path.insert(0, _p(CFG["paths"]["cosyvoice_code"]))
-sys.path.insert(0, _p(CFG["paths"]["matcha_code"]))
+sys.path.insert(0, r"D:\py-tts\CosyVoice-2.0")
+sys.path.insert(0, r"D:\py-tts\third_party\Matcha-TTS-main")
 
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
 
-DEF_MODEL = _p(CFG["paths"]["cosyvoice_model"])
-DEF_PROMPT = _p(CFG["paths"]["prompt_wav"])
-DEF_PROMPT_TEXT = CFG.get("prompt_text", "希望你以后能够做的比我还好呦。")
-DEF_PORT = int(CFG.get("ports", {}).get("tts", 18081))
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEF_MODEL = r"D:\py-tts\models\CosyVoice2-0.5B"
+DEF_PROMPT = r"D:\py-tts\assets\prompt.wav"
+DEF_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
 OUT = os.path.join(HERE, "out")
-SHARE = _p(CFG["paths"]["voice_share_dir"])  # served by the ASR endpoint as /voice/*
-LAST = {"text": "", "file": ""}
+SHARE = r"D:\Harness工作区\dsh-tools\py-asr\voice"  # served by the ASR endpoint as /voice/*
+LAST = {"text": "", "file": "", "at": 0}
 
 
 def build_app(model_dir, prompt, prompt_text, fp16):
@@ -92,6 +69,7 @@ def build_app(model_dir, prompt, prompt_text, fp16):
     @app.get("/health")
     def health():
         return {"status": "ok", "ready": holder["model"] is not None,
+                "lastUsed": LAST.get("at", 0),
                 "note": "model loads on the first /say request"}
 
     @app.get("/last")
@@ -137,6 +115,7 @@ def build_app(model_dir, prompt, prompt_text, fp16):
                     pass
             LAST["text"] = clean
             LAST["file"] = os.path.basename(mp3)
+            LAST["at"] = time.time()
         except OSError:
             pass
         return FileResponse(mp3, media_type="audio/mpeg")
@@ -168,7 +147,7 @@ def build_app(model_dir, prompt, prompt_text, fp16):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=DEF_PORT)
+    ap.add_argument("--port", type=int, default=18081)
     ap.add_argument("--model", default=DEF_MODEL)
     ap.add_argument("--prompt", default=DEF_PROMPT)
     ap.add_argument("--prompt-text", default=DEF_PROMPT_TEXT)
