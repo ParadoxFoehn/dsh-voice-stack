@@ -475,12 +475,21 @@ const ENSURE = '/voice-player/ensure';
       return false;
     }
 
+    // Which session this composer belongs to. The slot's props carry `sessionId` (string) — found
+    // by dumping the props shape (2026-10-28 00:5x). Without it the host had to guess "newest
+    // session", which sent a voice recorded in one conversation into another one.
+    let CURRENT_SESSION = '';
+
     async function postToSession(line) {
       // Official admission, no composer involved: GET with a query keeps us out of body
-      // parsing, which is what 500'd on the first attempt (2026-10-27 21:59). The host
-      // resolves the live session itself when sessionId is omitted.
+      // parsing, which is what 500'd on the first attempt (2026-10-27 21:59). sessionId is
+      // ALWAYS sent — no id, no direct delivery (the caller then falls back to the composer,
+      // which is always bound to the right session).
+      if (!CURRENT_SESSION) return false;
       try {
-        const r = await fetch('/voice-player/probe-send?text=' + encodeURIComponent(line), { cache: 'no-store' });
+        const q = '/voice-player/probe-send?text=' + encodeURIComponent(line)
+          + '&sessionId=' + encodeURIComponent(CURRENT_SESSION);
+        const r = await fetch(q, { cache: 'no-store' });
         if (!r.ok) {
           try { const t = await r.text(); console.warn('[voice] probe-send', r.status, t.slice(0, 220)); } catch (e) {}
           return false;
@@ -546,6 +555,21 @@ const ENSURE = '/voice-player/ensure';
       const warnRef = React.useRef(null);
       const busyRef = React.useRef(false);
       React.useEffect(() => { window.__voiceInputActions = props && props.inputActions; });
+      // The composer slot carries the session id; keep it in module scope so the
+      // delivery route can address THIS conversation instead of guessing.
+      // SAFE DEGRADATION (for people who just downloaded the plugin): if the harness in front of
+      // us does not expose `sessionId` in the slot props, direct delivery is disabled and the
+      // marker goes to the composer instead — the user presses Enter IN THEIR OWN conversation,
+      // so a wrong session is impossible. Better a clunky path than a silent misdelivery.
+      React.useEffect(() => {
+        if (props && props.sessionId) { CURRENT_SESSION = String(props.sessionId); return; }
+        CURRENT_SESSION = '';
+        if (!window.__voiceNoSessionWarned) {
+          window.__voiceNoSessionWarned = true;
+          setState('此环境未提供会话标识，语音将放进输入框（安全降级）');
+          setTimeout(() => setState(''), 6000);
+        }
+      });
       React.useEffect(() => { installVoiceBubblesV4(); installTransientVoicePlayer(); }, []);
       React.useEffect(() => {
         const onErr = (ev) => {

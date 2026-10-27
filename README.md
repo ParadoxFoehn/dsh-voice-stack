@@ -86,6 +86,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 - `plugin/client.js` 留有 0.1/试探期的遗留代码（旧 DOM 扫描、未使用的 `VoiceBubble`/`clickSendButton`），不影响运行。
 - 自动播放受浏览器策略约束：被拒时**静默失败**，消息里的白卡仍可点播。
 
+## 装它之前先看这一段（兼容与安全降级）
+
+这套插件依赖 DSH 客户端插槽里的一个字段：`conversation.input.left` 的 **`props.sessionId`**。
+它决定"这条语音属于哪个会话"。**没有它，插件不会猜**。
+
+| 你的环境 | 行为 |
+| --- | --- |
+| DSH 提供 `props.sessionId`（当前版本有） | 语音直接投递到你正在看的会话 |
+| 没有这个字段（更老的宿主） | **自动降级**：标记写进输入框，你按回车发到自己的会话；同时提示“此环境未提供会话标识，语音将放进输入框（安全降级）” |
+| 宿主收到多会话但没有 `sessionId` | 服务端**直接 400**（`sessionId required`），绝不按“最近活跃”猜 |
+
+> 为什么这么设计：0.1 那种“猜一个最像的会话”会让 A 会话的语音**静默**落进 B 会话——用户只有在偶然点错会话时才会发现。**宁可失败得明显，也不要成功得错误。**
+
+自检命令（改完代码或怀疑环境不对时跑一次，退出码 0 才算过）：
+
+```powershell
+py.cmd dsh-tools\check-voice-stack.py --offline        # 文件/契约/发布包一致性
+py.cmd dsh-tools\check-voice-stack.py --host http://127.0.0.1:<端口>   # 运行时 + 契约必须被拒
+```
+
 ## 许可
 
 代码 MIT；模型各自遵循其原始许可（Apache-2.0 等），见 `THIRD-PARTY-NOTICES.md`。

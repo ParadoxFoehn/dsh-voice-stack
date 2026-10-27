@@ -62,6 +62,8 @@ export function apply(ctx) {
   // whether they parsed, whether the guards blocked them) so the operator can read it over
   // HTTP instead of opening devtools — two blind render attempts were enough.
   let bubbleReport = null;
+  const recentReports = [];   // ring buffer (last 20): one-shot probes must survive the scanner
+  const slotProbes = [];      // payloads that carry `probe: …` (e.g. slot-props dump)
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/voice-player/bubble-report',
@@ -82,10 +84,20 @@ export function apply(ctx) {
           raw = Buffer.concat(chunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(c)))).toString('utf8');
         }
         if (raw) {
-          try { bubbleReport = JSON.parse(raw); } catch (e) { bubbleReport = { raw: String(raw).slice(0, 600) }; }
+          let parsed;
+          try { parsed = JSON.parse(raw); } catch (e) { parsed = { raw: String(raw).slice(0, 600) }; }
+          // Ring buffer: the scanner reports every few seconds, so a one-shot probe (e.g. the
+          // slot-props dump) would be overwritten before it could be read. Keep the last 20.
+          recentReports.push({ ...((parsed && typeof parsed === 'object') ? parsed : { value: parsed }), receivedAt: Date.now() });
+          if (recentReports.length > 20) recentReports.shift();
+          if (parsed && parsed.probe) slotProbes.push(parsed);
+          if (slotProbes.length > 5) slotProbes.shift();
+          bubbleReport = parsed;
           return send(200, { ok: true, stored: true });
         }
-        return send(200, { ok: true, report: bubbleReport });
+        // ?all=1 returns every retained report, newest last (use it for one-shot probes).
+        const all = new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('all');
+        return send(200, { ok: true, report: bubbleReport, slotProbes, recent: all ? recentReports : undefined });
       } catch (e) {
         return send(500, { ok: false, error: String((e && e.message) || e) });
       }
@@ -143,11 +155,21 @@ export function apply(ctx) {
 
           let sessionId = url.searchParams.get('sessionId') || '';
           if (!sessionId) {
+            // Do NOT guess. The old code picked "most recently updated" and silently delivered a
+            // voice recorded in conversation A into conversation B (2026-10-28). Guessing turns a
+            // bug into a silent wrong result, so it is only allowed when there is exactly one
+            // session and the answer is therefore unambiguous.
             const list = await listOf();
             const arr = Array.isArray(list) ? list : (list && (list.sessions || list.items || list.list)) || [];
-            const sorted = arr.slice().sort((a, b) => String((b && (b.updatedAt || b.lastActivityAt || b.createdAt)) || '').localeCompare(String((a && (a.updatedAt || a.lastActivityAt || a.createdAt)) || '')));
-            const pick = sorted[0];
-            sessionId = pick && (pick.id || pick.sessionId);
+            if (arr.length !== 1) {
+              return reply(400, {
+                error: 'sessionId required',
+                reason: 'the client must name its own session; the host refuses to guess',
+                sessions: arr.length,
+                sample: arr.slice(0, 3).map((s) => (s && (s.sessionId || s.id)) || '?'),
+              });
+            }
+            sessionId = (arr[0] && (arr[0].sessionId || arr[0].id)) || '';
             if (!sessionId) return reply(400, { error: 'no session resolved', listSample: arr.slice(0, 2) });
           }
 
