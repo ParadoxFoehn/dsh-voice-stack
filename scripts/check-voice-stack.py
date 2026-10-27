@@ -165,14 +165,17 @@ def d_runtime(host):
 
 
 def main():
+    global PLUGIN, RELEASE
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--offline", action="store_true")
-    ap.add_argument("--plugin", default=PLUGIN, help="plugin directory (default: this machine's)")
-    ap.add_argument("--release", default=RELEASE, help="release package directory")
+    ap.add_argument("--plugin", default=None, help="plugin directory (default: this machine's)")
+    ap.add_argument("--release", default=None, help="release package directory")
     args = ap.parse_args()
-    global PLUGIN, RELEASE
-    PLUGIN, RELEASE = args.plugin, args.release
+    if args.plugin:
+        PLUGIN = args.plugin
+    if args.release:
+        RELEASE = args.release
 
     if not os.path.isdir(PLUGIN) or not os.path.isdir(RELEASE):
         print("cannot run: plugin or release directory missing")
