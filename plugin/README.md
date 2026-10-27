@@ -1,54 +1,60 @@
 # @local/dsh-voice-player
 
-DSH 插件：给助手一张嘴——注册 `voice_say` 工具，并提供极简播放器视图。
+本机语音能力的**宿主侧与工具侧**：注册 `voice_say` 工具，让 agent 主动"开口说话"。
+播放器渲染走 `speak` 技能的透明容器（见下），因为工具调用卡在界面上默认折叠，不适合放播放器。
 
 ## 组成
 
-| 文件 | 作用 |
-| --- | --- |
-| `index.js` | 宿主侧：`ctx.tools.register('voice_say')`。收到文本先请求 TTS 服务预热合成（18081），失败回退 SAPI（18080）。 |
-| `client.js` | 客户端侧：`tool.call.toolview` 的 `voice_say` 视图，一个原生播放器（无卡片样式）。工具卡在界面上默认折叠，所以正式投放的播放器由技能 `speak` 用透明容器 iframe 输出。 |
-| `cordis.patch.yml` | 插入插件行 `voice-player`。 |
-| `locale/*.json` `icon.svg` | 插件管理面板里的标题、描述、图标。 |
+- `index.js`（host）：注册工具 `voice_say(text)` → 预热调用本机 CosyVoice2（`127.0.0.1:18081/say`），失败回退 SAPI（`18080/tts`）。
+- `client.js`（web）：`tool.call.toolview` 的 `voice_say` 视图（极简原生播放器；工具卡折叠时看不到，属正常）。
+- `cordis.patch.yml`：插入 `voice-player` 行。
 
-## 依赖的服务
+## 依赖的本机服务
 
-| 端口 | 服务 | 说明 |
+| 端口 | 服务 | 目录 | 启动 |
+| --- | --- | --- | --- |
+| 18081 | CosyVoice2 TTS（懒加载，冷 16 s / 热 1 s） | `dsh-tools\py-tts` | `tts-server.cmd`（由守护拉起） |
+| 18080 | Qwen3-ASR + 播放页/静态音频 | `dsh-tools\py-asr` | `asr-server.cmd` |
+
+守护：`dsh-tools\py-asr\guard-asr.ps1`（通用化：`-Port/-Server/-LogName`），启动目录 `DSH-ASR-Guard.cmd` 同时拉两个；客户端退出即停。
+手动重启：`dsh-tools\py-asr\restart-guards.ps1`。
+
+## 怎么发语音
+
+见技能 **`speak`**（`D:\Harness工作区\.dsh\skills\speak\SKILL.md`）：
+`voice_say` 预热 → 取 `/last` 的 `file` → 透明容器 + `iframe` 播放器 → 空行 + 文字复述。
+
+## 本机补丁与已知坑
+
+- 中文路径：所有 TTS/ASR 调用必须走 ASCII junction（`D:\py-tts`、`D:\py-asr`），否则 cog/nagisa/wetext 等 C++ 依赖读不了文件。
+- 控制台闪烁：所有 `subprocess` 已加 `CREATE_NO_WINDOW`；服务用 WMI 脱离控制台启动（`guard-asr.ps1`）。
+- 别挂 `conversation.chat.turnTail` 自动播放器：那版代码有 bug，会让**每条回复后面都跟一条重复的语音**（2026-10-24 移除）。注意这是**实现 bug**，不是"用户不想听语音"——用户要的恰恰是"我说语音，你回语音"，只是每条只能有一条，不能叠加。
+- `<audio>` 标签会被消息渲染层过滤；`<iframe>` 必须包在 `#vcp-root` 里才渲染。
+
+## 助手的回话规则（插件自带，改动见 `index.js` 顶部 `systemPrompt.section`）
+
+`index.js` 往系统提示里写了一条**三行**的规则（约 120 token/轮）：
+
+> 对话里出现 `【语音 N.Ns】http…` 标记 ＝ 用户刚发来一条语音 → **必须先用 `voice_say` 回一条语音**（先说要点，20 秒以内），细节留给文字；用户只打字时不适用。
+
+装了这个插件，"别人家的小肥鱼"也会照做——用户发语音、AI 用语音回。不想要这条，删掉 `index.js` 里那个 `systemPrompt.section({...})` 即可，其余功能不受影响。
+
+## 用户侧：录一条语音发出去（2026-10-27 定稿）
+
+输入框左侧的**声波按钮**：点一下 → 探活语音服务（没起就自动拉起）→ 录音 → 录完进**待发托盘**（右下角浮层）。
+
+- 托盘里每条可试听、可 `×` 撤回；底部「发送 N 条」一次发出。
+- 发出后是**一条消息、N 个标记**，渲染层按标记拆成 N 个独立播放器气泡。
+- **不经过输入框**：走宿主路由 `/voice-player/probe-send` → `sessionController.prompt()`（与定时提醒同一扇门），所以不存在"文字闪进输入框""发送后残留在框里"这些问题。
+
+## 可调参数（改完重启客户端生效）
+
+都在 `client.js` 顶部，一处改完即可：
+
+| 常量 | 默认 | 含义 |
 | --- | --- | --- |
-| 18081 | CosyVoice2 TTS | `/say?text=` 合成（按文本缓存）、`/player?file=` 播放页、`/last` 最近一句 |
-| 18080 | Qwen3-ASR | `/v1/audio/transcriptions` 转写、`/voice/*` 静态音频、`/player`、`/tts`（SAPI 兜底） |
+| `MAX_DRAFTS` | `3` | 待发托盘最多攒几条，满了拒绝新录音并提示 |
+| `MAX_SECONDS` | `30` | 单条录音硬上限（秒），到点自动停止 |
+| `WARN_SECONDS` | `20` | 录到多少秒开始提示"已偏长"（不打断） |
 
-两者都由 `scripts/restart-guards.ps1` 拉起，随客户端进程起落。
-
-## 配置
-
-`cordis.patch.yml` 里有三个键：
-
-| 键 | 默认 | 作用 |
-| --- | --- | --- |
-| `stackDir` | 空 | 本仓库在你机器上的绝对路径，例如 `D:\\dsh-voice-stack`。用于"服务没起时自动拉起 TTS"；留空则只能用 SAPI 兜底 |
-| `ttsPort` | 18081 | CosyVoice2 服务端口 |
-| `sapiPort` | 18080 | ASR / SAPI 兜底端口 |
-
-环境变量 `DSH_VOICE_STACK` 可以覆盖 `stackDir`。
-
-## 安装
-
-把本目录作为 bundle 装进 DSH profile，然后**完全重启客户端**（宿主侧模块要重新加载）。
-
-## 怎么用
-
-见技能 `speak`：`voice_say` 预热 → 取 `/last` 的文件名 → 透明容器 + iframe 播放器 → 空行 + 文字复述。
-
-## 四条硬规则（都是踩出来的）
-
-1. 消息里的 HTML 必须包 `#vcp-root`，否则显示成代码；
-2. 播放器容器要**透明、零内边距**，否则会被看成卡片；
-3. `<audio>` 标签会被消息渲染层过滤，别用；
-4. 播放器和正文之间留空行（`margin-bottom` + 空行）。
-
-## 已知坑
-
-- 不要在 `conversation.chat.turnTail` 挂自动播放器：会在每轮回复下面都冒出一条"我的语音"。
-- 工具调用卡默认折叠，把播放器只放在 toolview 里用户看不见。
-- 音色取决于 TTS 服务的参考音 `assets/prompt.wav`，不是这个插件决定的。
+**想一次攒更多条，就改 `MAX_DRAFTS`**——文件里那段注释写着依据：0.6B 快道实测 22.2 秒能完整正确转写；模型的音频位置上限 `max_source_positions = 1500` 换算约 60 秒，是硬边界，但长句的断句与标点会变差，所以默认取 30 秒。托盘上限只影响体验（一次塞太多条，我在一条消息里读起来也吃力），技术上没有硬限制。

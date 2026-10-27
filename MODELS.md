@@ -1,95 +1,90 @@
-# MODELS
+# MODELS（v0.2.0）
 
-两个必需模型 + 两个第三方代码仓库。总量约 **8.8 GB**，全部可从 ModelScope / GitHub 获取（脚本已封装）。
+四个本地模型，分两组：**说的**（TTS，18082）与**听的**（ASR，18083 快道 / 18080 长音）。
+全部 Apache-2.0，全部可从 ModelScope 直接拉（脚本已封装）。
 
-## 必需
+| 角色 | 模型 | 体积 | 端口 | 常驻策略 |
+| --- | --- | --- | --- | --- |
+| 说（日常） | **Qwen3-TTS-12Hz-0.6B-Base**（克隆） | 2.34 GB | 18082 | 低优先级：闲置 30 s 且整机显存 >16 GB 时被关 |
+| 说（定音色） | **Qwen3-TTS-12Hz-1.7B-VoiceDesign** | 4.21 GB | 18082 | 只在"设计音色 / 换嗓子"时加载 |
+| 听（交互） | **Qwen3-ASR-0.6B** | 1.75 GB | 18083 | 快道，默认档 |
+| 听（长音） | **Qwen3-ASR-1.7B** | 4.38 GB | 18080 | 正常优先级，视频/长音轨才用；默认不启动 |
+| 历史兜底 | CosyVoice2-0.5B | 3.79 GB | 18081 | 0.1.0 的嗓子，现在默认不起 |
 
-### 1. Qwen3-ASR-1.7B —— 语音转文字
+## 1. 声音是怎么定下来的（一次，然后长期复用）
 
-| 项 | 值 |
-| --- | --- |
-| 用途 | 语音输入；`verify.ps1` 的"读回来"自检；把 mp3 回读成文字来验证合成是否正常 |
-| 来源 | ModelScope `Qwen/Qwen3-ASR-1.7B` |
-| 体积 | **4.38 GB**（13 个文件） |
-| 目录 | `models/Qwen3-ASR-1.7B/` |
-| 许可 | Apache-2.0 |
-| 显存 | 约 6.5 GB 峰值（fp16，1.7B） |
+1. 用 **1.7B VoiceDesign** 按一段中文描述生成参考音：
+   > 年轻的女声，音色清亮但柔和，语气温和亲近，语速中等，句尾轻轻收住，带一点笑意，不要播音腔，也不要有距离感。
+2. 选中的那一条落成 `assets/voice-me.wav`（参考音）+ `voice.json`（`mode/instruct/ref/ref_text`）。
+3. 之后**日常说话只用 0.6B Base 克隆**这把嗓子 —— 便宜、快、稳定；1.7B 只在"想换个嗓子"时再出来一次。
 
-必需文件：
+`voice.json` 现在长这样：
 
-```
-config.json  configuration.json  generation_config.json  preprocessor_config.json
-chat_template.json  tokenizer_config.json  merges.txt  vocab.json
-model.safetensors.index.json
-model-00001-of-00002.safetensors   4024.8 MB
-model-00002-of-00002.safetensors    456.0 MB
-README.md
-```
-
-### 2. CosyVoice2-0.5B —— 文字转语音
-
-| 项 | 值 |
-| --- | --- |
-| 用途 | 主要的"嗓子"；零样本音色克隆（一句参考音定音色） |
-| 来源 | ModelScope `iic/CosyVoice2-0.5B` |
-| 体积 | 全量 4.41 GB；**本包只下载必需部分 ≈ 3.9 GB** |
-| 目录 | `models/CosyVoice2-0.5B/` |
-| 许可 | Apache-2.0 |
-| 显存 | 约 2.5–3.5 GB |
-
-必需文件（`scripts/download-models.py` 会全部拉取）：
-
-```
-campplus.onnx                     27.0 MB    说话人嵌入
-cosyvoice2.yaml                              模型结构 + 采样率 24000
-configuration.json
-flow.pt                          429.7 MB    flow matching
-hift.pt                           79.5 MB    声码器
-llm.pt                          1929.6 MB    语言模型主干（最大）
-speech_tokenizer_v2.onnx         473.1 MB    语音分词器
-README.md
-CosyVoice-BlankEN/model.safetensors  942.3 MB  Qwen2.5-0.5B 底座（必需！）
-CosyVoice-BlankEN/{config.json, generation_config.json, tokenizer_config.json,
-                   merges.txt, vocab.json}
+```json
+{
+  "mode": "clone",
+  "instruct": "年轻的女声，音色清亮但柔和，语气温和亲近，语速中等，句尾轻轻收住，带一点笑意，不要播音腔，也不要有距离感。",
+  "ref": "D:\\py-tts\\assets\\voice-me.wav",
+  "ref_text": "这个声音定下来了。以后我说话，就是这个嗓子。"
+}
 ```
 
-**刻意不下载**的文件（约 1.5 GB，只在流式/TensorRT/批处理时才需要）：
+## 2. 实测（RTX 5090 Laptop 24 GB / 31.4 GB RAM）
 
-```
-flow.cache.pt                       429.6 MB
-flow.decoder.estimator.fp32.onnx    273.1 MB
-flow.encoder.fp32.zip               183.5 MB
-flow.encoder.fp16.zip               111.3 MB
-speech_tokenizer_v2.batch.onnx      473.1 MB
-```
+### TTS（18082 · 0.6B 克隆，热态）
 
-## 必需（第三方代码，不是模型权重）
+| 文本长度 | 音频时长 | 合成耗时 | RTF | 备注 |
+| --- | --- | --- | --- | --- |
+| 短句 | 4.34 s | 1.63 s | 0.38 | 首次口径 |
+| 30 字左右 | 7.92 s | 2.5 s | 0.31 | `/say` 实测（后复现） |
+| 68 字 | ~15 s | 5.05 s | 0.34 | 长句线性放大 |
 
-| 仓库 | 版本 | 目录 | 用途 |
+- **冷加载**：约 12.7 s（模型首次进显存）；整条冷路径（探活→拉起→合成）实测 **25–26 s**。
+- `/warm` 只加载模型、不发声，用来把这段延迟挪到"用户还没点播放之前"。
+- 首声延迟（整段 mp3 播法）= 合成耗时；流式 WAV 能到 0.4–0.6 s，但**会播到一半停住**（RIFF 长度 `FFFFFFFF`），因此不用于播放。
+
+### ASR（18083 · 0.6B 快道）
+
+| 音频 | 耗时 | RTF | 备注 |
 | --- | --- | --- | --- |
-| [FunAudioLLM/CosyVoice](https://github.com/FunAudioLLM/CosyVoice) | **tag `v2.0`** | `third_party/CosyVoice-2.0` | 推理代码 |
-| [shivammehta25/Matcha-TTS](https://github.com/shivammehta25/Matcha-TTS) | main | `third_party/Matcha-TTS` | CosyVoice 依赖的 `matcha` 包（上游以 git submodule 提供，本包直接取源码） |
+| 2 s（热） | 0.34 s | 0.17 | OpenAI 兼容接口 |
+| 14.49 s | 1.19 s | 0.08 | 与 1.7B 文字一致 |
+| 16.1 s | ~1.6 s | 0.10 | |
+| 22.2 s | ~2 s | 0.09 | 整句完整、无截断 |
+| 23.9 s | 11.09 s | 0.46 | 含排队/设备抖动 |
+| 30.0 s | 8.86 / 9.64 s | 0.30 / 0.32 | 两条 30 s 均完整转写 |
 
-> ⚠️ **版本是最容易踩的坑**：CosyVoice 的 `main` 分支已经是 **CosyVoice 3** 的代码。用 main 配 CosyVoice2 权重，结果是"能跑、能出声、但说的字不对"（我们用 ASR 回读对比确认过）。必须用 `v2.0` 标签。
+### ASR（18080 · 1.7B）
 
-## 可选（只有想用 AI 生成封面时才需要）
-
-| 模型 | 体积 | 说明 |
+| 音频 | 耗时 | RTF |
 | --- | --- | --- |
-| Qwen-Image 2.1（int8）+ qwen3vl-8b 文本编码 + VAE | ≈ 12.8 GB | ComfyUI 出图用；本包不含，与语音链路无关 |
+| 14.49 s | 2.04 s | 0.11 |
+| 峰值显存 | ≈ 6.5 GB | — |
 
-## 下载
+### 显存
 
-```powershell
-.venv-asr\Scripts\python.exe scripts\download-models.py          # 两个都下
-.venv-asr\Scripts\python.exe scripts\download-models.py --only asr
-.venv-asr\Scripts\python.exe scripts\download-models.py --only tts
-```
+| 状态 | 占用 |
+| --- | --- |
+| 只有基线（无语音服务） | 1.4–1.7 GB |
+| TTS 0.6B 就绪 | ≈ +2.5 GB |
+| 两个语音服务同时就绪 | 9.4–11.9 GB |
 
-脚本特性：
+## 3. 为什么有 30 秒上限
 
-- 已存在且非空的文件**跳过**（断点续传式重跑）
-- 直接走 ModelScope 文件 API（无需登录、无需 HF）
-- 会把 `CosyVoice-BlankEN` 子目录单独列出来下载（该子目录在文件列表里显示为 0 字节条目）
+- 音频编码器位置上限 `max_source_positions = 1500`，折算约 **60 秒**（硬边界）；
+- 输出侧 `max_new_tokens = 512`，大约 500 字；
+- 实测 22 s、30 s 都能完整正确转写，但**再长断句与标点会变差**，且回复成本上升。
 
-国内网络常见情况：ModelScope ≈ 20 MB/s；GitHub 直连可能不通，`install.ps1` 默认走 `https://gh-proxy.com/` 前缀，可用 `-GitHubProxy` 换。
+因此客户端取 **30 s 硬停 + 20 s 提醒**（`client.js` 顶部 `MAX_SECONDS` / `WARN_SECONDS`）。想放宽就改这两个常量，60 s 是天花板。
+
+## 4. 下载与体积
+
+| 模型 | ModelScope 仓库 | 体积 |
+| --- | --- | --- |
+| Qwen3-ASR-0.6B | `Qwen/Qwen3-ASR-0.6B` | 1.75 GB |
+| Qwen3-ASR-1.7B | `Qwen/Qwen3-ASR-1.7B` | 4.38 GB |
+| Qwen3-TTS-12Hz-0.6B-Base | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | 2.34 GB |
+| Qwen3-TTS-12Hz-1.7B-VoiceDesign | `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` | 4.21 GB |
+| CosyVoice2-0.5B（可选） | `iic/CosyVoice2-0.5B` | 3.79 GB |
+
+`scripts/download-models.py` 会跳过用不到的大文件；大权重走 `scripts/fetch-big.py` 的多线程分段下载（ModelScope 大文件单连接容易卡 0 MB）。

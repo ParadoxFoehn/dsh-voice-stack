@@ -25,29 +25,25 @@ import tempfile
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
 
-
-def _load_config():
-    """config/config.json (written by scripts/install.ps1), else the shipped example."""
-    path = os.environ.get("DSH_VOICE_CONFIG") or os.path.join(REPO, "config", "config.json")
-    if not os.path.isfile(path):
-        path = os.path.join(REPO, "config", "config.example.json")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-CFG = _load_config()
-
-
-def _p(value):
-    if not value:
-        return ""
-    return value if os.path.isabs(value) else os.path.join(REPO, value)
-
-
-DEF_MODEL = _p(CFG["paths"]["asr_model"])
-DEF_PORT = int(CFG.get("ports", {}).get("asr", 18080))
+# Launched with pythonw there is no console: sys.stderr is None, and the first log write
+# would crash. Give it a file instead (this is why the services used to die with a
+# "window-CLOSE event" abort when their console host went away).
+if sys.stdout is None:
+    try:
+        os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
+        sys.stdout = open(os.path.join(HERE, "logs", "stdout.log"), "a", encoding="utf-8", buffering=1)
+    except Exception:
+        import io as _io2
+        sys.stdout = _io2.StringIO()
+if sys.stderr is None:
+    try:
+        os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
+        sys.stderr = open(os.path.join(HERE, "logs", "stderr.log"), "a", encoding="utf-8", buffering=1)
+    except Exception:
+        import io as _io
+        sys.stderr = _io.StringIO()
+DEF_MODEL = os.path.join(HERE, "models", "Qwen3-ASR-1.7B")
 
 # Voice plugins send ISO codes ("zh", "zh-CN", "yue"); the model accepts full names only,
 # and rejects anything else with ValueError (a 500 for the caller).
@@ -88,8 +84,9 @@ def build_app(loader, default_lang):
 
     app = FastAPI(title="local-qwen3-asr", version="1.0")
     holder = {"model": None}
+    ACTIVITY = {"at": 0.0}
     lock = threading.Lock()
-    voice_dir = _p(CFG["paths"].get("voice_share_dir") or os.path.join(HERE, "voice"))
+    voice_dir = os.path.join(HERE, "voice")
     os.makedirs(voice_dir, exist_ok=True)
 
     # LOCAL PATCH (2026-10-24): the chat page fetches /last-voice from another loopback port;
@@ -193,6 +190,7 @@ def build_app(loader, default_lang):
     def health():
         return {"status": "ok", "model": os.path.basename(DEF_MODEL),
                 "ready": holder["model"] is not None,
+                "lastUsed": ACTIVITY["at"],
                 "note": "model loads lazily on the first transcription request"}
 
     @app.get("/v1/models")
@@ -242,6 +240,7 @@ def build_app(loader, default_lang):
             if response_format == "text":
                 from fastapi.responses import PlainTextResponse
                 return PlainTextResponse(text)
+            ACTIVITY["at"] = time.time()
             return JSONResponse({"text": text})
         finally:
             try:
@@ -256,7 +255,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=DEF_MODEL)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=DEF_PORT)
+    ap.add_argument("--port", type=int, default=18080)
     ap.add_argument("--language", default="Chinese", help="default language, 'auto' to detect")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()

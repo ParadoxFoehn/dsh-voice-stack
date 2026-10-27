@@ -1,87 +1,128 @@
-# 架构：一条语音在机器里怎么走
+# 架构（v0.2.0）
+
+> 一句话：**语音走消息流，不走输入框**。用户的话和助手的话都变成会话里的消息，音频用原生的 `<audio>` 播放；插件只负责"录制 / 合成 / 投递 / 播一次"四件事。
+
+## 1. 组成
 
 ```
-                               ┌──────────────────────────────┐
-  DSH 客户端（对话界面）        │  plugin/   @local/dsh-voice-player
-  ┌───────────────────┐        │  ├─ index.js  (host)  voice_say 工具
-  │ #vcp-root iframe   │◄───────┼──┤   └─ 预热请求 18081/say
-  │ 18081/player?file= │        │  └─ client.js (web)  播放器视图
-  └───────────────────┘        └──────────────────────────────┘
-            ▲                                   │
-            │ ② GET /last 取文件名               │ ① 预热
-            │                                   ▼
-  ┌─────────┴──────────────┐        ┌──────────────────────────┐
-  │ asr 服务  127.0.0.1:18080│        │ tts 服务  127.0.0.1:18081 │
-  │ • /v1/audio/transcriptions│◄─────┤ • /say?text=  合成 mp3    │
-  │ • /voice/<file>  静态音频 │  镜   │ • /player?file= 播放页    │
-  │ • /player?file=  播放页   │  像   │ • /last         最近一句   │
-  │ • /health                 │  文   │ • /health                 │
-  └─────────┬──────────────┘  件   └────────────┬─────────────┘
-            │                                    │
-            ▼                                    ▼
-   models/Qwen3-ASR-1.7B              models/CosyVoice2-0.5B
-   （4.4 GB，懒加载，~6.5 GB 显存）    （3.9 GB 必需文件，懒加载，~3 GB 显存）
+┌───────────────────────────── DSH 客户端（Electron 渲染进程）─────────────────────────────┐
+│  plugin/client.js  (@local/dsh-voice-player · web 半边)                                  │
+│    ├─ 声波按钮（conversation.input.left, order 6） → 录音 → 待发托盘 → 发送                │
+│    ├─ 标记 → 气泡渲染（把 `【语音 N.Ns】url` 换成原生 <audio> 白卡）                        │
+│    └─ 一次性播放器（轮询 /last-voice → 挂 <audio> → 播一次 → 撕掉 → 写记号）               │
+└───────────────────────────────────────┬────────────────────────────────────────────────┘
+                                        │ HTTP（全部 127.0.0.1）
+┌───────────────────────────────────────┴────────────────────────────────────────────────┐
+│  plugin/index.js（host 半边 · 跑在宿主进程）                                             │
+│    ├─ 工具 voice_say(text)          → 确保 TTS 在跑 → /say 整段合成 → 记录 lastVoice      │
+│    ├─ 路由 GET /voice-player/ensure        → 探活/拉起 TTS（WMI 脱离进程，无控制台）       │
+│    ├─ 路由 GET /voice-player/probe-send    → sessionController.prompt()（用户语音投递）    │
+│    ├─ 路由 GET /voice-player/last-voice    → 客户端轮询"刚合成的是哪个文件"                │
+│    ├─ 路由 GET /voice-player/bubble-report → 客户端回传气泡扫描结果（自诊断）              │
+│    └─ systemPrompt.section                 → 三行规则：用户发语音 → 必须语音回复            │
+└───────────────────────────────────────┬────────────────────────────────────────────────┘
+                                        │
+        ┌───────────────────────────────┼───────────────────────────────┐
+        │                               │                               │
+┌───────┴────────┐              ┌───────┴────────┐              ┌───────┴────────┐
+│ 18082 TTS      │              │ 18083 ASR 快道 │              │ 18080 ASR 长音 │
+│ Qwen3-TTS      │              │ Qwen3-ASR-0.6B │              │ Qwen3-ASR-1.7B │
+│ 0.6B 克隆为主  │              │ 交互短句       │              │ 视频/长音频    │
+│ 1.7B 设计音色  │              │ 默认档         │              │ 默认不启动     │
+└────────────────┘              └────────────────┘              └────────────────┘
 ```
 
-## 三个进程，两条链路
+端口与进程都独立于插件：**插件只发 HTTP，不自己加载模型**，所以模型挂了插件不会挂。
 
-### 发语音（我 → 你）
+## 2. 两条主流程
 
-1. agent 调 `voice_say(text)`；
-2. 插件宿主侧向 `18081/say?text=…` 发请求（把模型加载与合成的等待吃掉）；
-3. 服务端按文本 hash 缓存 mp3（`tts/out/say-<hash>.mp3`），并把副本镜像到
-   `shared_voice/`（配置项 `voice_share_dir`），因为 ASR 服务负责静态文件对外供给；
-4. agent 取 `18081/last` 拿到文件名；
-5. 在消息里输出一个**透明容器 + iframe**：
-   `<div id="vcp-root">…<iframe src="http://127.0.0.1:18081/player?file=…">`；
-6. 播放页是一个只有 `<audio controls preload="metadata">` 的极简 HTML —— 控件可见、不自动播。
-
-### 收语音（你 → 我，可选）
-
-插件或任何兼容客户端把音频 POST 到 `18080/v1/audio/transcriptions`（OpenAI 兼容格式），
-服务端把任意格式音频用 ffmpeg 转成 16 kHz 单声道后交给 Qwen3-ASR。
-
-## 为什么要两个服务而不是一个
-
-- 两套模型依赖的 numpy / transformers 版本**互斥**（见 HARDWARE.md），必须两个 venv；
-- 两个进程各自懒加载，互不拖累；显存按需占用，空闲时几乎为 0；
-- 静态音频与播放页挂在 ASR 服务上（它是先写的那个），省一个端口。
-
-## 启动策略（2026-10-24 调整）和服务管理
-
-语音服务**不再随开机/客户端自启**：`scripts/restart-guards.ps1` 与 `asr/guard-asr.ps1` 保留为可选工具（手动排障时用），默认不注册开机项。
-启动方式改为按需：
-
-- agent 调 `voice_say` 时，插件先探测 `18081/health`，不在就**脱离控制台拉起** TTS，然后合成；
-- 或用本地模型悬浮窗（`@local/local-models-monitor`）里语音条目的「启动 / 关闭」按钮；
-- 语音模型属**低优先级**：闲置（默认 30 秒无请求）且整机显存高于 16 GB 时自动关闭，给其它模型让路。
-
-## 守护（可选工具）：随客户端起落
-
-`asr/guard-asr.ps1` 是一个通用守护（`-Port/-Server/-LogName`），行为：
+### 2.1 用户说 → 助手听（voice input）
 
 ```
-客户端进程存在 → 端口没监听就拉起（WMI 脱离控制台，避免黑窗）
-客户端进程消失 → 结束该端口进程，释放显存
+点声波 → GET /health（18082）
+        ↘ 没起 → GET /voice-player/ensure（WMI 拉起，等最多 ~30 s）
+录音（MediaRecorder · audio/webm;codecs=opus，30 s 硬上限）
+   → POST /upload?ext=webm&transcribe=0（原始字节）
+   → 服务端 ffmpeg 转 16k 单声道 mp3，落 out/in-<hash>.mp3
+   → 返回 {url:"/say-file/in-….mp3", seconds: 12.3}
+   → 客户端生成标记并放入托盘（最多 3 条，可试听/撤回）
+点「发送 N 条」→ 标记拼接 → GET /voice-player/probe-send?text=…
+   → 宿主：sessionController.prompt({ sessionId, requestId, content:[text], mode:'followup' })
+   → createUserMessage({ content, source:{kind:'user'} }) → agent.followup(message)
+   → 会话里出现一条用户消息（**不经过输入框，不合成按键**）
+渲染：气泡扫描器把"整段只有标记"的元素换成白卡 + 原生 <audio>（一条消息 N 个标记 → N 个气泡）
+助手读到标记 → 转写（18083）→ 决定回复
 ```
 
-`scripts/restart-guards.ps1` 用同一份守护脚本起两份实例（18080 / 18081）。
+### 2.2 助手说 → 用户听（voice output）
 
-## 数据与缓存
+```
+助手调用 voice_say(text)
+   → 宿主 ensureTts()（探活/拉起）
+   → GET /say?text=…（整段合成，按 sha1(模式+音色+文本) 缓存到 out/qwen-<digest>.mp3）
+   → GET /last → { file:"qwen-….mp3", sec: 9.0 }
+   → 宿主记住 lastVoice = { file, secs, at }
 
-| 位置 | 内容 | 可否删除 |
+客户端（每 1.2 s）→ GET /voice-player/last-voice
+   → 文件在 localStorage['dsh-voice-played'] 里？在 → 跳过
+   → 不在 → 在 body 上挂一个不可见 <audio>，自动播放**一次**
+   → ended：写记号 + 立刻移除元素
+   → error：只移除，**不写记号**（下次还会响）
+
+助手消息正文另外给一张白底淡蓝边卡片（/player?file=…，不自动播）= 重听入口
+```
+
+## 3. 关键设计决策（都有代价，写清为什么）
+
+| 决策 | 原因 | 代价 |
 | --- | --- | --- |
-| `tts/out/` | 合成结果（按文本 hash 缓存） | 可，删了会重新合成 |
-| `shared_voice/` | 供 ASR 服务静态分发的副本 | 可 |
-| `logs/` | 服务输出与守护日志 | 可 |
-| `models/` | 模型权重 | 不要随意删，重下要 8.8 GB |
+| 用户语音走 `sessionController.prompt` | 这是官方"用户发消息"入口，与定时提醒同一扇门；消息是真正的 user 消息，历史/重放/搜索都正常 | 需要宿主有 `sessionController`（DSH 0.2.1+ 默认有） |
+| 助手语音**整段合成 mp3** 而非流式 WAV | WAV 流式头里长度是 `FFFFFFFF`，浏览器没有终点，会**播到一半停住**（实测） | 首声延迟 ≈ 时长 × 0.38（7.9 s 音频约 2.5 s，热态） |
+| 一次性播放器放在**插件层**而不是消息里 | 消息列表虚拟化：滚出视口就卸载，消息里的 `<audio>`/iframe 会重载、从头播 | 播放不跟随消息滚动（这也正是想要的行为） |
+| 判据用「播完记号」而不是时间窗 | 时间不知道用户听没听；被打断/切走都算没听完 | 需要持久化（localStorage），且只保留最近 200 条 |
+| 气泡渲染**不改 `conversation.chat.node`** | 接管渲染器会连普通消息一起改，历史上把按钮和草稿一起卸掉过 | 只能在 DOM 上"替换整段只有标记的元素"，限制形态 |
 
-## 设计取舍（为什么是现在这样）
+## 4. 端点清单（自测用）
 
-| 选择 | 原因 |
-| --- | --- |
-| iframe 播放器，而不是 `<audio>` 标签 | 消息渲染层会过滤 `<audio>`；裸 iframe 又会被当纯文本，必须包 `#vcp-root` |
-| 播放页由服务端出，而不是插件组件 | 工具调用卡在界面上默认折叠，播放器放进去用户看不到 |
-| 透明容器（`background:transparent;padding:0`） | 满足"纯净播放器、不要卡片样式"的要求 |
-| 文本 hash 命名 | 同一句话重复发不重复合成，第二次是毫秒级 |
-| 所有子进程 `CREATE_NO_WINDOW` | 否则每次合成都会闪一个黑色控制台窗口 |
+| 端点 | 方法 | 用途 |
+| --- | --- | --- |
+| `/health` | GET | `{base_ready, design_ready, lastUsed, voice}` |
+| `/warm` | GET | 只加载模型不发声（回复前预热） |
+| `/voice` | GET/POST | 读/写音色（`mode/instruct/ref/ref_text`） |
+| `/say?text=` | GET | 整段合成 mp3（缓存） |
+| `/say-stream?text=` | GET | 流式 WAV（**不要用于播放**，见上） |
+| `/say-player?text=&autoplay=` | GET | 整段合成的播放页（带 `合成中…` 状态） |
+| `/player?file=&autoplay=` | GET | 播放**已存在**文件（重听入口） |
+| `/say-file/<name>` | GET | 音频实体（`audio/mpeg`） |
+| `/last` | GET | 最近一次合成的 `{text,file,sec,wall}` |
+| `/upload` | POST | 原始音频字节 → mp3（可选转写） |
+| `/voice-player/ensure` | GET | 拉起 TTS |
+| `/voice-player/probe-send?text=&sessionId=` | GET | 投递一条用户消息（`?probe=list` 可列会话） |
+| `/voice-player/last-voice` | GET | 客户端轮询用 |
+| `/voice-player/bubble-report` | GET/POST | 自诊断（客户端上报，运维读取） |
+
+## 5. 文件地图
+
+```
+tts/qwen_tts_server.py       TTS 主服务（0.6B 克隆 + 1.7B 设计 + 播放页 + 上传）
+asr/asr_server.py            ASR 服务（OpenAI 兼容 /v1/audio/transcriptions；18080/18083 同代码不同模型）
+plugin/index.js              宿主半边（工具 + 5 个路由 + 三行系统提示）
+plugin/client.js             web 半边（按钮 / 托盘 / 气泡 / 一次性播放器）
+scripts/install.ps1          装两个 venv、torch cu128、模型、参考音
+scripts/verify.ps1           端到端自检（TTS / ASR / 播放页 / 端口）
+```
+
+## 6. 排障顺序
+
+1. `GET /health` 看 `base_ready`；false 说明模型没加载（`/warm` 一次）。
+2. 听不到 → 看 `GET /voice-player/last-voice` 是否有 file；有 file 但没响 → 多半是自动播放策略（卡片仍可点）。
+3. 气泡不出来 → `GET /voice-player/bubble-report` 读 `count / diag / bodyHits`：
+   - `bodyHits = 0` → 标记根本没进 DOM；
+   - `bodyHits > 0` 但 `count = 0` → 候选被守卫拦（看 `diag[].guard` / `at` / `len`）。
+4. 用户语音发不出去 → `GET /voice-player/probe-send?probe=list` 确认会话可解析。
+
+## 7. 已知限制
+
+- 只在 Windows + RTX 5090 Laptop（24 GB）验证；12 GB 以下需换更小模型或走 CPU。
+- `client.js` 留有 0.1/试探期的遗留代码（旧 DOM 扫描、未用的 `VoiceBubble`/`clickSendButton`），不影响运行。
+- 单条录音上限 30 s（`MAX_SECONDS`）；0.6B ASR 的音频位置上限 `max_source_positions=1500`，折算约 60 s 是硬边界。
