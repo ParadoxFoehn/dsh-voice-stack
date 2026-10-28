@@ -3,43 +3,6 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const COSY = 'http://127.0.0.1:18081';   // CosyVoice2 TTS service
-    const SAPI = 'http://127.0.0.1:18080';   // fallback TTS
-
-    // Build the audio URL from the tool arguments. CosyVoice2 is preferred; the SAPI endpoint
-    // is only used when the first one is unreachable (the browser falls back on error below).
-    function sayUrl(text) {
-      return COSY + '/say?text=' + encodeURIComponent(String(text || '').slice(0, 800));
-    }
-
-    function pickArgs(block) {
-      if (!block) return {};
-      let a = block.args;
-      if (typeof a === 'function') { try { a = a(); } catch (e) { return {}; } }
-      if (a && typeof a === 'object' && 'value' in a && a.value && typeof a.value === 'object') a = a.value;
-      return (a && typeof a === 'object') ? a : {};
-    }
-
-    // A bare player: no card, no border, no background — just the native controls,
-    // with enough margin below so the next paragraph does not stick to it.
-    function VoiceMessage(props) {
-      const args = pickArgs(props.block);
-      const text = typeof args.text === 'string' ? args.text : '';
-      const [src, setSrc] = React.useState('');
-      React.useEffect(() => {
-        if (text) setSrc(sayUrl(text));
-      }, [text]);
-      if (!text) return h('div', { style: { margin: '8px 0' } }, '语音消息…');
-      return h('div', { style: { margin: '10px 0 18px' } },
-        h('audio', {
-          src,
-          controls: true,
-          preload: 'metadata',
-          style: { width: '100%', maxWidth: 460, height: 34, display: 'block' },
-          onError: () => setSrc(SAPI + '/tts?text=' + encodeURIComponent(text.slice(0, 800))),
-        })
-      );
-    }
 
     // ------------------------------------------------------------------ voice input
     // Record with the mic, upload the raw audio to the local TTS service, then put a voice
@@ -80,109 +43,6 @@ const ENSURE = '/voice-player/ensure';
         return false;
       }
     }
-
-
-    // ------------------------------------------------------------------ bubbles (DOM post-process)
-    // The marker text keeps the audio address, so we do not need to take over the user-node
-    // renderer (that is what broke the client on 2026-10-27). Instead we rewrite the marker in
-    // place: find the text node, swap it for a small bubble with a player. Anything else on the
-    // page is left untouched, and the plugin can simply be disabled to undo it.
-    const BUBBLE_MARK = /【语音\s*([\d.]+)s】\s*(https?:\/\/\S+)/;
-    function installVoiceBubbles() {
-      // DISABLED 2026-10-27: the element scan could replace a container that also held the
-      // composer (marker text inside it), which removed the voice button and the draft.
-      // Bubbles are cosmetic; the recording path must never be at risk. Re-enable only with
-      // a message-list-scoped selector.
-      if (true) return;
-      if (typeof document === 'undefined' || window.__voiceBubblesOn) return;
-      window.__voiceBubblesOn = true;
-      try {
-        const probe = document.createElement('div');
-        probe.setAttribute('data-voice-bubble-probe', '1');
-        probe.textContent = '气泡 v3 · 扫描中…';
-        probe.style.cssText = 'position:fixed;right:14px;bottom:70px;z-index:2147483000;font:11px system-ui;'
-          + 'padding:3px 8px;border-radius:999px;background:rgba(47,107,69,.9);color:#fff;opacity:.9;pointer-events:none';
-        document.body.appendChild(probe);
-        window.__voiceProbe = probe;
-        setTimeout(() => { probe.textContent = '气泡 v3 · 无变化'; }, 3000);
-        setTimeout(() => probe.remove(), 12000);
-      } catch (e) {}
-      const seen = new WeakSet();
-      const roots = () => {
-        const out = [document.body];
-        const walk = (root) => {
-          try {
-            for (const el of root.querySelectorAll('*')) {
-              if (el.shadowRoot) { out.push(el.shadowRoot); walk(el.shadowRoot); }
-            }
-          } catch (e) { /* ignore */ }
-        };
-        walk(document.body);
-        return out;
-      };
-      const rewrite = (report) => {
-        let hits = 0, swapped = 0;
-        try {
-          for (const root of roots()) {
-            for (const el of root.querySelectorAll('*')) {
-              if (el.hasAttribute && el.hasAttribute('data-voice-bubble')) continue;
-              if (el.closest && el.closest('textarea, input, [contenteditable="true"]')) continue;
-              const txt = el.textContent || '';
-              if (txt.indexOf('【语音') < 0) continue;
-              const m = BUBBLE_MARK.exec(txt);
-              if (!m) continue;
-              if (txt.length > 400) continue;
-              if (el.querySelector && el.querySelector('[data-voice-bubble]')) continue;
-              let inner = false;
-              for (const kid of el.children || []) {
-                if (BUBBLE_MARK.test(kid.textContent || '')) { inner = true; break; }
-              }
-              if (inner) continue;
-              // A block may hold SEVERAL markers (two voice messages accumulated in one
-              // send). Build one bubble per marker instead of one per block.
-              const all = [];
-              const g = new RegExp(BUBBLE_MARK.source, 'g');
-              let mm;
-              while ((mm = g.exec(txt)) !== null) {
-                if (mm[1] && mm[2]) all.push({ secs: mm[1], url: mm[2] });
-              }
-              if (!all.length) continue;
-              hits += all.length;
-              const holder = document.createElement('span');
-              holder.setAttribute('data-voice-bubble', '1');
-              holder.style.cssText = 'display:inline-flex;flex-direction:column;gap:6px';
-              for (const one of all) {
-                const wrap = document.createElement('span');
-                wrap.style.cssText = 'display:inline-flex;flex-direction:column;gap:4px;padding:8px 12px;'
-                  + 'border-radius:14px;border:1px solid rgba(128,128,128,.30);background:rgba(127,179,232,.12);max-width:420px';
-                const cap = document.createElement('span');
-                cap.textContent = '语音 · ' + one.secs + ' 秒';
-                cap.style.cssText = 'font-size:11px;opacity:.7;letter-spacing:.06em';
-                const fr = document.createElement('iframe');
-                fr.src = 'http://127.0.0.1:18082/player?file=' + encodeURIComponent(one.url.split('/').pop());
-                fr.title = '语音';
-                fr.style.cssText = 'width:340px;max-width:100%;height:44px;border:0;background:transparent';
-                wrap.appendChild(cap);
-                wrap.appendChild(fr);
-                holder.appendChild(wrap);
-                swapped += 1;
-              }
-              try { el.replaceWith(holder); } catch (e) { /* ignore */ }
-            }
-          }
-        } catch (e) { /* never break the page */ }
-        if (report) report(hits, swapped);
-      };
-      rewrite((h, sw) => { const p = window.__voiceProbe; if (p) p.textContent = '气泡 v3 · 命中 ' + h + ' · 替换 ' + sw; });
-      let pending = false;   // throttle: chat streams a lot of mutations
-      const mo = new MutationObserver(() => {
-        if (pending) return;
-        pending = true;
-        setTimeout(() => { pending = false; rewrite((h, sw) => { const p = window.__voiceProbe; if (p) p.textContent = '气泡 v3 · 命中 ' + h + ' · 替换 ' + sw; }); }, 250);
-      });
-      mo.observe(document.body, { childList: true, subtree: true });
-    }
-
 
     // ------------------------------------------------------------------ bubbles v4
     // Narrow rewrite: a text node that is ENTIRELY the marker becomes a bubble, and its host
@@ -422,59 +282,6 @@ const ENSURE = '/voice-player/ensure';
       setInterval(rewrite, 4000);   // safety net for re-mounted / virtualised lists
     }
 
-
-    // The composer shows the raw marker until it is sent; voice users expect "press and it
-    // goes". After inserting, send it right away so the draft never shows the URL.
-    function clickSendButton() {
-      try {
-        const cands = Array.from(document.querySelectorAll('button'));
-        const score = (b) => {
-          const t = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')
-            + ' ' + (b.textContent || '') + ' ' + (b.getAttribute('type') || '')).toLowerCase();
-          let s2 = 0;
-          if (/send|发送|submit|回车/.test(t)) s2 += 10;
-          if (b.type === 'submit') s2 += 6;
-          if (!b.disabled) s2 += 2;
-          const r = b.getBoundingClientRect();
-          if (r.bottom > window.innerHeight * 0.55) s2 += 3;   // bottom area = composer
-          if (r.width < 60 && r.height < 60) s2 += 1;
-          return s2;
-        };
-        const best = cands.map((b) => ({ b, s: score(b) })).sort((a, z) => z.s - a.s)[0];
-        if (best && best.s >= 12) { best.b.click(); return true; }
-      } catch (e) { /* ignore */ }
-      return false;
-    }
-
-    // Defined again 2026-10-27: the call site survived while the definition was lost in an
-    // earlier patch, so pressing send threw ReferenceError inside a React effect and the whole
-    // slot unmounted - the voice button and the pending message vanished with it.
-    // Slot components receive the composer's own actions; calling them is the supported way
-    // to submit, unlike a synthetic Enter that React ignores. Shapes differ between versions,
-    // so probe defensively instead of assuming one name.
-    function sendViaActions(actions, line) {
-      if (!actions) return false;
-      const call = (name, arg) => {
-        try {
-          const fn = actions[name];
-          if (typeof fn !== 'function') return false;
-          fn.call(actions, arg);
-          return true;
-        } catch (e) {
-          try { console.warn('[voice] action ' + name + ' failed', e); } catch (x) {}
-          return false;
-        }
-      };
-      if (call('setText', line) || call('setValue', line) || call('insertText', line)) {
-        // text placed through the official API: now submit
-      }
-      for (const n of ['submit', 'send', 'submitMessage', 'commit', 'sendMessage']) {
-        if (call(n)) return true;
-        if (call(n, line)) return true;
-      }
-      return false;
-    }
-
     // Which session this composer belongs to. The slot's props carry `sessionId` (string) — found
     // by dumping the props shape (2026-10-28 00:5x). Without it the host had to guess "newest
     // session", which sent a voice recorded in one conversation into another one.
@@ -507,11 +314,10 @@ const ENSURE = '/voice-player/ensure';
         return true;
       } catch (e) { /* fall through */ }
       try {
-        // DISABLED 2026-10-27: probing inputActions made the message vanish (neither in the
-        // composer nor in the chat). Until the exact submit contract is confirmed, put the text
-        // in the composer and let the user press Enter - that way nothing is ever lost.
-        // const acts = window.__voiceInputActions;
-        // if (sendViaActions(acts, line)) return true;
+        // Second line of defence: put the marker in the composer and let the user press Enter.
+        // A synthetic Enter is attempted too, but never a guessed send button — pressing the
+        // wrong control is how a message disappears. The composer always belongs to THIS
+        // conversation, so this path can never deliver to the wrong session.
         const el = document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
         let prev = null;
         if (el) { prev = el.style.opacity; el.style.opacity = '0'; }
@@ -554,7 +360,6 @@ const ENSURE = '/voice-player/ensure';
       const chunksRef = React.useRef([]);
       const warnRef = React.useRef(null);
       const busyRef = React.useRef(false);
-      React.useEffect(() => { window.__voiceInputActions = props && props.inputActions; });
       // The composer slot carries the session id; keep it in module scope so the
       // delivery route can address THIS conversation instead of guessing.
       // SAFE DEGRADATION (for people who just downloaded the plugin): if the harness in front of
@@ -575,6 +380,11 @@ const ENSURE = '/voice-player/ensure';
         const onErr = (ev) => {
           try {
             const msg = (ev && (ev.message || (ev.error && ev.error.message))) || 'unknown error';
+            // Benign browser noise, not a voice failure: ResizeObserver fires this when a resize
+            // triggers another resize inside the same frame; the spec says to ignore it. Showing
+            // it as "语音出错" was our bug (reported 2026-10-28 02:5x).
+            if (/ResizeObserver loop/i.test(msg)) return;
+            if (/Script error\.?$/i.test(msg)) return;
             if (window.__voiceErrShown === msg) return;
             window.__voiceErrShown = msg;
             setState('语音出错：' + String(msg).slice(0, 70));
@@ -772,59 +582,9 @@ const ENSURE = '/voice-player/ensure';
       );
     }
 
-    // ------------------------------------------------------------------ voice bubble
-    // The mic inserts a text marker "【语音 4.4s】http://…/say-file/x.mp3". This renderer
-    // turns that marker into a playable bubble. It replaces the shipped `user` node, so it
-    // must also draw ordinary messages; that is the plain-text fallback below.
-    const MARK = /【语音\s*([\d.]+)s】\s*(https?:\/\/\S+)/;
-
-    function nodeText(node) {
-      if (!node) return '';
-      if (typeof node.text === 'string') return node.text;
-      if (Array.isArray(node.blocks)) {
-        return node.blocks.map((b) => (b && (b.text || b.value)) || '').join('\n');
-      }
-      if (Array.isArray(node.content)) {
-        return node.content.map((c) => (c && (c.text || c.value)) || '').join('\n');
-      }
-      return '';
-    }
-
-    function VoiceBubble(props) {
-      const text = nodeText(props.node);
-      const m = MARK.exec(text || '');
-      if (!m) {
-        return h('div', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } },
-          props.children || text);
-      }
-      const secs = m[1];
-      const url = m[2];
-      const file = url.split('/').pop();
-      const isMine = url.indexOf('18082') >= 0;
-      return h('div', {
-        style: {
-          display: 'inline-flex', flexDirection: 'column', gap: 4,
-          maxWidth: 420, padding: '8px 12px', borderRadius: 14,
-          background: isMine ? 'rgba(127,179,232,.14)' : 'rgba(128,128,128,.10)',
-          border: '1px solid rgba(128,128,128,.28)', color: 'inherit',
-        },
-      },
-        h('span', { style: { fontSize: 11, opacity: 0.7, letterSpacing: '.06em' } },
-          '🎙 语音 · ' + secs + ' 秒'),
-        h('iframe', {
-          src: PLAY + '/player?file=' + encodeURIComponent(file),
-          title: '语音',
-          style: { width: 360, maxWidth: '100%', height: 44, border: 0, background: 'transparent' },
-        })
-      );
-    }
-
     return {
       inject: ['slots'],
       apply(ctx) {
-        ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
-          name: 'tool.call.toolview', key: 'voice_say',
-        }, VoiceMessage));
         // Sits in the composer's LEFT tool cluster, right after the sticker/emoji button
         // (meme-picker is order 5 there) — a plain multi-occupant list slot, so nothing
         // existing is replaced.

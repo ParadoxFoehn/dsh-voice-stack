@@ -34,11 +34,11 @@
 - 新增自诊断路由 `GET /voice-player/bubble-report`：客户端把气泡扫描结果（候选元素、是否解析、是否被守卫拦、整页命中数）回传宿主，排障不必开 devtools。
 - 删掉死的 `/voice-player/post-disabled`（早期探索用 `subagents.sendMessage` 的错误路径）。
 - 宿主系统提示新增一条三行规则：**用户发语音时必须先用 `voice_say` 回语音**，只打字时不适用。
+- 清理 `client.js` 里 0.1 时期的死代码（843 → 598 行）：旧 DOM 扫描器、未用的 `VoiceBubble`、`clickSendButton`、`sendViaActions`，以及指向已退役 18081 的 `VoiceMessage` 播放器。
 
 ### 已知限制
 
 - 只在 Windows + RTX 5090 Laptop（24 GB）实测；其它显卡需自选 cu 轮子。
-- `client.js` 仍留有早期渲染方案的遗留代码（旧 DOM 扫描、未使用的 `VoiceBubble`/`clickSendButton`），不影响运行，下个版本清理。
 - CosyVoice2（`18081`）作为历史兜底保留，默认不启动。
 
 ## 0.1.0 - 2026-10-24

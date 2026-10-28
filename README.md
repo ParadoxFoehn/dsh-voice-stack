@@ -83,7 +83,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 
 - 只在 Windows + RTX 5090 Laptop（24 GB）实测；12 GB 以下需要换更小模型或走 CPU（见 `docs/HARDWARE-TIERS.md`）。
 - 单条录音上限 30 s；0.6B ASR 的硬边界约 60 s（`max_source_positions=1500`）。
-- `plugin/client.js` 留有 0.1/试探期的遗留代码（旧 DOM 扫描、未使用的 `VoiceBubble`/`clickSendButton`），不影响运行。
+- `plugin/client.js` 已清理 0.1 时期的死代码（843 → 598 行），保留的只有当前链路：录音/托盘/气泡/一次性播放器。
 - 自动播放受浏览器策略约束：被拒时**静默失败**，消息里的白卡仍可点播。
 
 ## 装它之前先看这一段（兼容与安全降级）

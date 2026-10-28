@@ -124,5 +124,5 @@ scripts/verify.ps1           端到端自检（TTS / ASR / 播放页 / 端口）
 ## 7. 已知限制
 
 - 只在 Windows + RTX 5090 Laptop（24 GB）验证；12 GB 以下需换更小模型或走 CPU。
-- `client.js` 留有 0.1/试探期的遗留代码（旧 DOM 扫描、未用的 `VoiceBubble`/`clickSendButton`），不影响运行。
+- `client.js` 已在 2026-10-28 清理（843 → 598 行）：旧 DOM 扫描、`VoiceBubble`、`clickSendButton`、`sendViaActions`、指向已退役 18081 的 `VoiceMessage` 全部移除。
 - 单条录音上限 30 s（`MAX_SECONDS`）；0.6B ASR 的音频位置上限 `max_source_positions=1500`，折算约 60 s 是硬边界。
