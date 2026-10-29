@@ -26,6 +26,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# --- guard: refuse to install over an old v0.1 setup -------------------------
+$pf = Join-Path $PSScriptRoot 'preflight.ps1'
+if (Test-Path $pf) {
+    & $pf
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ''
+        Write-Host 'INSTALL BLOCKED: old v0.1 detected.'
+        Write-Host 'Tell the owner to remove the old install first; details in scripts/preflight.json'
+        Write-Host 'and the human-readable text in scripts/messages.json.'
+        exit 1
+    }
+}
+# ---------------------------------------------------------------------------
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 function Say($m) { Write-Host ("[install] " + $m) }

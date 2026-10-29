@@ -1,29 +1,15 @@
 {
   "name": "@local/dsh-voice-player",
-  "version": "0.1.0",
-  "description": "Voice messages for a DSH agent: an offline CosyVoice2 TTS tool plus a minimal in-chat player.",
-  "license": "MIT",
-  "author": "dsh-voice-stack contributors",
+  "version": "0.2.0",
+  "private": true,
   "type": "module",
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "voice", "tts", "cosyvoice", "local"],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ParadoxFoehn/dsh-voice-stack.git"
-  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": [
-    "index.js",
-    "client.js",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg",
-    "README.md"
-  ],
+  "files": ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {

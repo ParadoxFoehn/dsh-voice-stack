@@ -1,0 +1,12 @@
+{
+  "_comment": "Human-readable text for scripts/preflight.ps1. The script is pure ASCII; the assistant reads this file and relays message_zh to its owner.",
+  "old-v01": {
+    "title_zh": "请先删除旧版（v0.1.0）再安装",
+    "message_zh": "检测到你机器上还有旧版的语音栈。新版和旧版的目录结构、端口、模型都不一样，直接覆盖会装出两套互相打架的服务，所以安装已被拦下。\n\n请先做这三步：\n1) 关闭客户端；\n2) 删除旧版目录（通常是 dsh-voice-stack 文件夹）以及它下面的 models/third_party；\n3) 在插件管理里卸载旧插件（@local/dsh-voice-player），然后重启客户端。\n\n做完再重新运行安装脚本即可。旧版里你自己生成的语音文件（out\\*.mp3）可以留着，不影响。",
+    "allow_override": false
+  },
+  "ok": {
+    "title_zh": "可以安装",
+    "message_zh": "没有检测到旧版残留，可以继续安装。"
+  }
+}
