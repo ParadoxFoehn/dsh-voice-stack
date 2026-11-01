@@ -13,15 +13,15 @@
 
 实测数字：
 
-- ASR（Qwen3-ASR-1.7B）：首次加载 3.3 s；转写 RTF ≈ 0.11（56.5 s 音频 → 6.1 s）；峰值显存 ≈ 6.5 GB
-- TTS（CosyVoice2-0.5B）：首次加载 ≈ 15 s（含读权重）；之后一句话 1–3 s；显存 ≈ 2.5–3.5 GB
-- 两个服务**同时常驻**约占 9–10 GB 显存，24 GB 卡余量充足
+- ASR（Qwen3-ASR-0.6B，0.3.0 默认）：常驻显存 ≈ 2.3 GB；1.7B 仅在显式指定时加载（≈ 4.7 GB）
+- TTS（Qwen3-TTS-12Hz-0.6B，0.3.0 默认走 CPU）：不占显存，内存约 2.6 GB；一句话 1–3 s（CPU 与 GPU 实测同速）
+- 两个服务**同时常驻**约占 **2.3 GB** 显存（0.3.0 起），8 GB 显卡也能跑全套；空闲 120 s 自动卸载后更低
 
 ## 最低要求
 
 | 项 | 最低 | 说明 |
 | --- | --- | --- |
-| GPU | **12 GB 显存**可全套常驻；**8 GB 只能常驻一个**（建议只跑 TTS） | 分级方案见 [docs/HARDWARE-TIERS.md](docs/HARDWARE-TIERS.md) |
+| GPU | **8 GB 显存即可全套常驻**（0.3.0：ASR 0.6B + TTS CPU，约 2.3 GB）；12 GB 以上更宽松 | 分级方案见 [docs/HARDWARE-TIERS.md](docs/HARDWARE-TIERS.md) |
 | 显卡架构 | sm_80 / sm_89 / sm_90 / sm_120 | **RTX 40 系用 `cu121` 轮子，RTX 50 系必须 `cu128`**（sm_120 在 cu121 里没有 kernel，会报 `no kernel image is available`） |
 | RAM | **16 GB 起** | 模型权重加载峰值约 10 GB；8 GB 会非常紧 |
 | 磁盘 | **约 20 GB** 空闲（安装期峰值约 25 GB） | 两个 venv 各 ≈5.5 GB + 两个模型 ≈8.2 GB |

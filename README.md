@@ -75,7 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 
 ## 先别装在你的工作机上：请先在沙箱里试
 
-这套东西会**装两个 Python 环境、下载约 12 GB 模型、占用最多 10 GB 显存**，而且是"跟系统交互型"的（拉起进程、监听端口、改开机项）。作者只在**一台机器**（Windows + RTX 5090 Laptop 24 GB）上跑通过，没做过跨设备验证。
+这套东西会**装两个 Python 环境、下载约 12 GB 模型、常驻约 2.3 GB 显存**（0.3.0 起；旧版约 9–10 GB），而且是"跟系统交互型"的（拉起进程、监听端口、改开机项）。作者只在**一台机器**（Windows + RTX 5090 Laptop 24 GB）上跑通过，没做过跨设备验证。
 
 建议顺序：沙箱机 → 只跑 `verify.ps1` → 跑通再装插件。
 

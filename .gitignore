@@ -24,3 +24,6 @@ desktop.ini
 # audio scratch files
 *.wav.part
 *.mp3.part
+
+# local ssh keys (never publish)
+.ssh/
