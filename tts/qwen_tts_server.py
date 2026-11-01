@@ -86,7 +86,27 @@ def save_voice():
         json.dump(STATE, f, ensure_ascii=False, indent=2)
 
 
-def build_app():
+def _pid_alive(pid):
+    """父进程还活着吗（Windows：开句柄看退出码；拿不到就当活着，宁可多跑不要误杀）。"""
+    if not pid:
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, int(pid))   # SYNCHRONIZE
+        if not h:
+            return False
+        code = ctypes.c_ulong(0)
+        k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return code.value == 259                     # STILL_ACTIVE
+    except Exception:
+        return True
+
+
+def build_app(parent_pid=0, idle_s=0):
+    """parent_pid：宿主插件进程，它一消失本服务自杀（不留孤儿、不占显存/内存）。
+    idle_s：空闲多少秒后卸载模型（0 = 常驻）。TTS 在 CPU 上冷加载要 ~15 s，别设太小。"""
     from fastapi import FastAPI, Request
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
@@ -107,6 +127,30 @@ def build_app():
                     holder[key] = FasterQwen3TTS.from_pretrained(path)
                     sys.stderr.write("[qwen-tts] %s ready in %.1fs\n" % (key, time.time() - t0))
         return holder[key]
+
+    def _watchdog():
+        while True:
+            time.sleep(5)
+            if not _pid_alive(parent_pid):
+                sys.stderr.write("[qwen-tts] parent %s gone -> exit\n" % parent_pid)
+                sys.stderr.flush()
+                os._exit(0)
+            if idle_s and (holder["base"] is not None or holder["design"] is not None):
+                last = LAST.get("at") or 0
+                if last and (time.time() - last) > idle_s:
+                    with lock:
+                        holder["base"] = None
+                        holder["design"] = None
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    sys.stderr.write("[qwen-tts] idle %ss -> model unloaded\n" % idle_s)
+                    sys.stderr.flush()
+
+    if parent_pid or idle_s:
+        threading.Thread(target=_watchdog, daemon=True).start()
 
     @app.middleware("http")
     async def cors(request, call_next):
@@ -129,6 +173,48 @@ def build_app():
                 "base_ready": holder["base"] is not None,
                 "design_ready": holder["design"] is not None,
                 "lastUsed": LAST["at"], "voice": STATE}
+
+    @app.post("/unload")
+    def unload():
+        """只卸模型、不杀进程 —— 给"模型要干活，先把显存腾出来"用（2026-10-30）。
+
+        TTS 不设 busy 否决：单次合成约 2.5 秒，被打断的代价是这一次请求失败、用户重说一句，
+        比"因为一次卡住就永远不让腾显存"划算。ASR 那边有否决（长音频要跑十几秒）。
+        """
+        before = 0
+        before_free = None
+        try:
+            import torch
+            before = torch.cuda.memory_allocated()
+            before_free = torch.cuda.mem_get_info()[0]
+        except Exception:  # noqa: BLE001
+            pass
+        with lock:
+            had = holder["base"] is not None or holder["design"] is not None
+            holder["base"] = None
+            holder["design"] = None
+        freed = 0
+        if had:
+            try:
+                # 先 gc 再 empty_cache：对象没死时清缓存只释放"空闲块"。
+                import gc
+                gc.collect()
+                import torch
+                torch.cuda.empty_cache()
+                if before_free is not None:
+                    freed = max(0, torch.cuda.mem_get_info()[0] - before_free)
+                else:
+                    freed = max(0, before - torch.cuda.memory_allocated())
+            except Exception:  # noqa: BLE001
+                pass
+            sys.stderr.write("[qwen-tts] unload -> freed %d MB (driver view)\n" % (freed // 1048576))
+            sys.stderr.flush()
+        # 卸不干净就让进程退场（判据用驱动口径），所有者下次用到会重新拉起。
+        resp = {"ok": True, "unloaded": had, "freed_mb": int(freed // 1048576)}
+        if had and before > 0 and freed < before * 0.5:
+            resp["restart"] = True
+            threading.Timer(1.5, lambda: os._exit(0)).start()
+        return resp
 
     @app.get("/warm")
     def warm(mode: str = ""):
@@ -443,10 +529,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=18082)
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="宿主插件 PID；它退出则本服务自杀（0 = 不管）")
+    ap.add_argument("--idle-unload", type=int, default=0,
+                    help="空闲 N 秒后卸载模型（0 = 常驻）")
     a = ap.parse_args()
     import uvicorn
     sys.stderr.write("[qwen-tts] listening http://%s:%d\n" % (a.host, a.port))
-    uvicorn.run(build_app(), host=a.host, port=a.port, log_level="warning")
+    uvicorn.run(build_app(a.parent_pid, a.idle_unload), host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":

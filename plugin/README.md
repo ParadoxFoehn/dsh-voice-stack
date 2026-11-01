@@ -1,60 +1,98 @@
-# @local/dsh-voice-player
+# @local/dsh-voice-player · v0.3.0
 
-本机语音能力的**宿主侧与工具侧**：注册 `voice_say` 工具，让 agent 主动"开口说话"。
-播放器渲染走 `speak` 技能的透明容器（见下），因为工具调用卡在界面上默认折叠，不适合放播放器。
+插件的两半：**让 agent 开口说话**（`voice_say` 工具），**让用户录一段发出去**（输入框左侧声波按钮）。
+另外从 v0.3.0 起，它还**负责本机两个语音服务的生命周期**——服务是插件的子进程，插件走，服务跟着走。
+
+> 这一版把"服务野在外面"的设计改掉了。旧版用 WMI 把 TTS 起在进程树之外（为了扛客户端重启），
+> 代价是插件停用/卸载后服务还在跑、显存不还，而用户没有任何办法关掉它。
 
 ## 组成
 
-- `index.js`（host）：注册工具 `voice_say(text)` → 预热调用本机 CosyVoice2（`127.0.0.1:18081/say`），失败回退 SAPI（`18080/tts`）。
-- `client.js`（web）：`tool.call.toolview` 的 `voice_say` 视图（极简原生播放器；工具卡折叠时看不到，属正常）。
-- `cordis.patch.yml`：插入 `voice-player` 行。
+| 文件 | 职责 |
+| --- | --- |
+| `index.js` | 宿主：注册 `voice_say`；暴露 status / service / settings 三个端点；插件卸载时杀掉服务 |
+| `services.js` | 服务生命周期：spawn、按档位传参、连树杀、`--parent-pid` 看门狗 |
+| `config.js` | 档位读写（`config.json`），坏值一律落回默认 |
+| `client.js` | 界面：声波按钮、待发托盘、气泡渲染、右键菜单、设置面板 |
+| `cordis.patch.yml` | 插入 `voice-player` 一行 |
 
-## 依赖的本机服务
+## 两个本机服务
 
-| 端口 | 服务 | 目录 | 启动 |
+| 端口 | 服务 | 模型 | 默认档 |
 | --- | --- | --- | --- |
-| 18081 | CosyVoice2 TTS（懒加载，冷 16 s / 热 1 s） | `dsh-tools\py-tts` | `tts-server.cmd`（由守护拉起） |
-| 18080 | Qwen3-ASR + 播放页/静态音频 | `dsh-tools\py-asr` | `asr-server.cmd` |
+| 18082 | Qwen3-TTS | 0.6B（clone 用 Base；design 才用 1.7B） | **CPU 常驻**（0 显存 / 2.6G 内存） |
+| 18080 | Qwen3-ASR | **0.6B**（1.7B 只在看视频/复杂音频时显式指定） | GPU + 空闲 120s 卸载（2.3G 显存） |
 
-守护：`dsh-tools\py-asr\guard-asr.ps1`（通用化：`-Port/-Server/-LogName`），启动目录 `DSH-ASR-Guard.cmd` 同时拉两个；客户端退出即停。
-手动重启：`dsh-tools\py-asr\restart-guards.ps1`。
+为什么 TTS 默认放 CPU：**实测同速**（36 字，GPU 2.55 s / CPU 2.50 s，0.98×）。
+TTS 是自回归逐字生成，`batch=1` 时是串行延迟瓶颈，显卡并行度用不上。省下的 2.3 G 显存比省下的内存值钱。
 
-## 怎么发语音
+## 生命周期（v0.3.0 的核心改动）
 
-见技能 **`speak`**（`D:\Harness工作区\.dsh\skills\speak\SKILL.md`）：
-`voice_say` 预热 → 取 `/last` 的 `file` → 透明容器 + `iframe` 播放器 → 空行 + 文字复述。
+```
+插件加载        → 只注册，不起服务（零占用）
+点灰色按钮      → 宿主 spawn 服务（带 --parent-pid）→ 就绪
+右键「关闭」    → 连进程树杀掉
+插件停用/卸载   → dispose 里 stopAll()
+插件进程崩溃    → 服务侧看门狗发现父进程消失 → 自杀
+```
 
-## 本机补丁与已知坑
+三条保证：**插件死服务死**（看门狗）、**卸载即清**（`stopAll`）、**不留孤儿**（`taskkill /T` 连子树）。
 
-- 中文路径：所有 TTS/ASR 调用必须走 ASCII junction（`D:\py-tts`、`D:\py-asr`），否则 cog/nagisa/wetext 等 C++ 依赖读不了文件。
-- 控制台闪烁：所有 `subprocess` 已加 `CREATE_NO_WINDOW`；服务用 WMI 脱离控制台启动（`guard-asr.ps1`）。
-- 别挂 `conversation.chat.turnTail` 自动播放器：那版代码有 bug，会让**每条回复后面都跟一条重复的语音**（2026-10-24 移除）。注意这是**实现 bug**，不是"用户不想听语音"——用户要的恰恰是"我说语音，你回语音"，只是每条只能有一条，不能叠加。
-- `<audio>` 标签会被消息渲染层过滤；`<iframe>` 必须包在 `#vcp-root` 里才渲染。
+## 用户怎么用
 
-## 助手的回话规则（插件自带，改动见 `index.js` 顶部 `systemPrompt.section`）
+- **左键**：录音 → 进待发托盘 → 「发送 N 条」。服务没起时，这一次点击是"启动服务"，按钮会变灰。
+- **右键**：菜单两项 —— 开启/关闭语音服务、设置…
+- **设置面板**：TTS 两栏（常驻 / 空闲卸载 + 秒数；GPU / CPU）+ ASR 一栏（常驻 / 空闲卸载），
+  底部实时显示预计占用。改动在**重新开启服务后**生效。
 
-`index.js` 往系统提示里写了一条**三行**的规则（约 120 token/轮）：
+## 助手怎么用
 
-> 对话里出现 `【语音 N.Ns】http…` 标记 ＝ 用户刚发来一条语音 → **必须先用 `voice_say` 回一条语音**（先说要点，20 秒以内），细节留给文字；用户只打字时不适用。
+见技能 `speak`。规则本体写在 `index.js` 的 `systemPrompt.section`（三行，约 120 token/轮）：
+用户发语音 → 必须用 `voice_say` 回一条语音（20 秒内），细节留给文字。
 
-装了这个插件，"别人家的小肥鱼"也会照做——用户发语音、AI 用语音回。不想要这条，删掉 `index.js` 里那个 `systemPrompt.section({...})` 即可，其余功能不受影响。
+## HTTP 端点（宿主侧）
 
-## 用户侧：录一条语音发出去（2026-10-27 定稿）
-
-输入框左侧的**声波按钮**：点一下 → 探活语音服务（没起就自动拉起）→ 录音 → 录完进**待发托盘**（右下角浮层）。
-
-- 托盘里每条可试听、可 `×` 撤回；底部「发送 N 条」一次发出。
-- 发出后是**一条消息、N 个标记**，渲染层按标记拆成 N 个独立播放器气泡。
-- **不经过输入框**：走宿主路由 `/voice-player/probe-send` → `sessionController.prompt()`（与定时提醒同一扇门），所以不存在"文字闪进输入框""发送后残留在框里"这些问题。
-
-## 可调参数（改完重启客户端生效）
-
-都在 `client.js` 顶部，一处改完即可：
-
-| 常量 | 默认 | 含义 |
+| 端点 | 方法 | 作用 |
 | --- | --- | --- |
-| `MAX_DRAFTS` | `3` | 待发托盘最多攒几条，满了拒绝新录音并提示 |
-| `MAX_SECONDS` | `30` | 单条录音硬上限（秒），到点自动停止 |
-| `WARN_SECONDS` | `20` | 录到多少秒开始提示"已偏长"（不打断） |
+| `/voice-player/status` | GET | 两个服务是否在跑 + 当前档位 |
+| `/voice-player/service?target=tts&action=start\|stop` | POST | 开关单个服务 |
+| `/voice-player/settings` | GET / POST | 读 / 写档位 |
+| `/voice-player/ensure` | GET | 兼容旧调用：确保 TTS 在跑 |
+| `/voice-player/last-voice` | GET | 最近一段合成的音频（客户端据此播放一次） |
+| `/voice-player/probe-send` | POST | 把语音标记投递到指定会话（**必须带 sessionId**） |
+| `/voice-player/bubble-report` | GET/POST | 气泡渲染诊断 |
 
-**想一次攒更多条，就改 `MAX_DRAFTS`**——文件里那段注释写着依据：0.6B 快道实测 22.2 秒能完整正确转写；模型的音频位置上限 `max_source_positions = 1500` 换算约 60 秒，是硬边界，但长句的断句与标点会变差，所以默认取 30 秒。托盘上限只影响体验（一次塞太多条，我在一条消息里读起来也吃力），技术上没有硬限制。
+## 配置（`config.json`，运行时生成）
+
+```json
+{
+  "asr": { "mode": "idle", "idleSec": 120 },
+  "tts": { "mode": "resident", "idleSec": 120, "device": "cpu" }
+}
+```
+
+`mode`: `resident` | `idle`；`device`: `gpu` | `cpu`。范围：`idleSec` 30–3600 秒。
+
+## 显存参考（实测，RTX 5090 Laptop）
+
+| 组合 | 显存 | 内存 |
+| --- | --- | --- |
+| ASR 0.6B(GPU) + TTS 0.6B(CPU) ← **默认** | 2.3 G | 3.0 G |
+| ASR 0.6B(GPU) + TTS 0.6B(GPU) | 4.6 G | 1.3 G |
+| 会议模式：ASR 1.7B(GPU) + TTS CPU | 4.7 G | 3.0 G |
+
+## 已知坑
+
+- **中文路径**：所有服务调用必须走 ASCII junction（`D:\py-tts`、`D:\py-asr`），
+  否则 `nagisa` / `wetext` 这些 C++ 依赖读不了文件。
+- **`<audio>` 标签会被消息渲染层过滤**；播放器要走 `#vcp-root` + `iframe`，或走气泡渲染的那条路。
+- **别挂 `turnTail` 自动播放器**：会让每条回复后面都跟一条重复语音（2026-10-24 移除）。
+- **不要用 WMI 起服务**：那是旧版的做法，会让服务脱离插件生命周期（见上）。
+- 改完插件要**重启客户端**才生效（宿主与客户端半边都在启动时加载）。
+
+## 版本
+
+- **0.3.0**（2026-10-30）服务归插件托管（spawn / 看门狗 / 卸载清理）；新增档位配置、
+  右键菜单、设置面板；TTS 默认走 CPU；ASR 默认 0.6B。
+- 0.2.0 — 待发托盘、v2 气泡、`probe-send` 会话绑定。
+- 0.1.0 — `voice_say` + 极简播放器。

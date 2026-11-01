@@ -1,47 +1,22 @@
-/** Host half of the voice-player bundle: registers the voice_say tool. */
-import { execFile } from 'node:child_process';
+/** Host half of the voice-player bundle: registers voice_say + owns the two local services. */
+import * as services from './services.js';
+import * as config from './config.js';
 
 export const inject = ['tools', 'webServer', 'systemPrompt'];
 
-const TTS_HEALTH = 'http://127.0.0.1:18082/health';
-// Qwen3-TTS (VoiceDesign) is the primary voice since 2026-10-27; the CosyVoice service
-// on 18081 is kept as a fallback in the execute() chain.
-const TTS_CMD = 'D:\\py-tts\\qwen-tts-server.cmd';
-const TTS_CWD = 'D:\\py-tts';
+const TTS_BASE = 'http://127.0.0.1:18082';
 
-async function ttsAlive() {
-  try {
-    const res = await fetch(TTS_HEALTH, { signal: AbortSignal.timeout(1200) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/** Start the TTS service detached from this process (WMI keeps it out of our job object). */
-function startTts() {
-  return new Promise((resolve) => {
-    const ps = [
-      '$startup = ([wmiclass]"Win32_ProcessStartup").CreateInstance()',
-      '$startup.ShowWindow = 0',
-      '$cmd = [char]34 + $env:VP_CMD + [char]34',
-      '$p = ([wmiclass]"Win32_Process").Create($cmd, $env:VP_CWD, $startup)',
-      '[Console]::Write($p.ReturnValue)',
-    ].join('; ');
-    execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
-      { timeout: 15000, windowsHide: true, env: { ...process.env, VP_CMD: TTS_CMD, VP_CWD: TTS_CWD } },
-      (err, stdout) => resolve(!err && String(stdout || '').trim() === '0'));
-  });
-}
-
-async function ensureTts() {
-  if (await ttsAlive()) return true;
-  await startTts();
-  for (let i = 0; i < 40; i += 1) {
-    await new Promise((r) => setTimeout(r, 500));
-    if (await ttsAlive()) return true;
-  }
-  return false;
+/**
+ * 确保某个服务在跑；不在就按当前档位把它拉起来。
+ *
+ * 2026-10-30 改：这里以前用 WMI 把 TTS 起在进程树之外（为了扛客户端重启），
+ * 代价是插件卸了服务还在、显存不还。现在一律走 services.js —— 服务是插件的子进程，
+ * 插件停用/卸载时连树杀掉，插件崩了服务侧的 --parent-pid 看门狗自杀。
+ */
+async function ensure(name) {
+  if (await services.alive(name)) return true;
+  const cfg = config.load();
+  return services.start(name, cfg[name]);
 }
 
 export function apply(ctx) {
@@ -207,7 +182,7 @@ export function apply(ctx) {
     kind: 'exact',
     path: '/voice-player/ensure',
     handler: async (req, res) => {
-      const ok = await ensureTts();
+      const ok = await ensure('tts');
       const body = JSON.stringify({ ok, alive: ok });
       res.statusCode = ok ? 200 : 503;
       res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -215,6 +190,79 @@ export function apply(ctx) {
       res.end(body);
     },
   }));
+
+  // ---- 服务开关与档位（2026-10-30 新增）---------------------------------
+  // 给 client.js 的三个端点：状态 / 开关 / 设置。统一 JSON 形状 { ok, ... }。
+  const sendJson = (res, code, obj) => {
+    const b = JSON.stringify(obj);
+    res.statusCode = code;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('content-length', Buffer.byteLength(b));
+    res.end(b);
+  };
+  const readBody = async (req) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    return Buffer.concat(chunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(c)))).toString('utf8');
+  };
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/voice-player/status',
+    handler: async (req, res) => {
+      const list = await services.status();
+      sendJson(res, 200, { ok: true, services: list, config: config.load() });
+    },
+  }));
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/voice-player/settings',
+    handler: async (req, res) => {
+      if (req.method === 'GET') return sendJson(res, 200, { ok: true, config: config.load() });
+      let body = {};
+      try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+      const cfg = config.save(body);
+      // 只存不重启：正在跑的服务按旧档位继续，下次 start 时读新档位。
+      return sendJson(res, 200, { ok: true, config: cfg, note: '重新开启服务后生效' });
+    },
+  }));
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/voice-player/service',
+    handler: async (req, res) => {
+      const url = new URL(req.url || '/', 'http://127.0.0.1');
+      const target = url.searchParams.get('target') || '';
+      const action = url.searchParams.get('action') || '';
+      if (target !== 'asr' && target !== 'tts') {
+        return sendJson(res, 400, { ok: false, error: 'target must be asr|tts' });
+      }
+      const cfg = config.load();
+      try {
+        if (action === 'start') {
+          const ok = await services.start(target, cfg[target]);
+          return sendJson(res, ok ? 200 : 503, { ok });
+        }
+        if (action === 'unload') {
+          // 只卸模型、不杀进程：给 local-models-monitor 那类"模型要干活"的调度用。
+          // ASR 正在转写时回 409 + busy，调用方应稍后重试，而不是强行杀掉。
+          const r = await services.unload(target);
+          return sendJson(res, r.status === 409 ? 409 : (r.ok ? 200 : 503), r);
+        }
+        if (action === 'stop') {
+          const ok = await services.stop(target);
+          return sendJson(res, ok ? 200 : 500, { ok });
+        }
+      } catch (e) {
+        return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) });
+      }
+      return sendJson(res, 400, { ok: false, error: 'action must be start|stop|unload' });
+    },
+  }));
+
+  // 插件卸载/停用 → 服务连树杀掉。这是"不留残骸"的唯一保证点。
+  ctx.effect(() => () => { services.stopAll(); });
 
   // Last synthesized clip, kept module-level so output.render() can emit the marker and so the
   // client can poll /voice-player/last-voice for its one-shot playback.
@@ -248,7 +296,7 @@ export function apply(ctx) {
     },
     async execute(args) {
       const text = String((args && args.text) || '').slice(0, 800);
-      const alive = await ensureTts();
+      const alive = await ensure('tts');
       if (!alive) return { ok: false, chars: text.length, engine: 'down', file: '', secs: 0 };
       // Synthesize the WHOLE clip here (cached by text digest on the server) instead of deferring
       // to playback: a real mp3 with a known length is the only variant that reliably plays to

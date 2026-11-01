@@ -43,7 +43,12 @@ if sys.stderr is None:
     except Exception:
         import io as _io
         sys.stderr = _io.StringIO()
-DEF_MODEL = os.path.join(HERE, "models", "Qwen3-ASR-1.7B")
+# 模型分档（用户 2026-10-30 定，别随手改回去）：
+#   默认 0.6B  —— 日常语音聊天。显存 2.3 GB；60 s 清洗音频上与 1.7B 逐字相同，速度还快 5%。
+#   1.7B       —— 只用于「会议录音转写」这类长音频、噪声/方言/术语多的场景，
+#                 靠 `--model D:\py-asr\models\Qwen3-ASR-1.7B` 显式指定。占 4.7 GB。
+#   ⚠️ 1.7B + TTS 0.6B + ollama 4B ≈ 12.5 GB，8 GB 卡必爆；默认走 0.6B 就是为了这个。
+DEF_MODEL = os.path.join(HERE, "models", "Qwen3-ASR-0.6B")
 
 # Voice plugins send ISO codes ("zh", "zh-CN", "yue"); the model accepts full names only,
 # and rejects anything else with ValueError (a 500 for the caller).
@@ -62,6 +67,24 @@ LANG_MAP = {
 SUPPORTED_LANGS = set(LANG_MAP.values())
 
 
+def _pid_alive(pid):
+    """父进程还活着吗（Windows：开了句柄再看退出码；拿不到就当活着，宁可多跑不要误杀）。"""
+    if not pid:
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, int(pid))   # SYNCHRONIZE
+        if not h:
+            return False
+        code = ctypes.c_ulong(0)
+        k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return code.value == 259                     # STILL_ACTIVE
+    except Exception:
+        return True
+
+
 def normalize_language(value, default):
     """ISO code or full name -> name the model accepts; unknown -> default (None = auto)."""
     raw = (value or "").strip()
@@ -77,14 +100,16 @@ def normalize_language(value, default):
     return default
 
 
-def build_app(loader, default_lang):
-    """`loader` is called on the FIRST transcription request (lazy load), then stays resident."""
+def build_app(loader, default_lang, parent_pid=0, idle_s=0):
+    """`loader` is called on the FIRST transcription request (lazy load), then stays resident.
+    `parent_pid`：宿主插件进程；它一消失，本服务自杀（不留孤儿、不留显存）。
+    `idle_s`：空闲多少秒后把模型卸掉（0 = 常驻）。"""
     from fastapi import FastAPI, File, Form, UploadFile
     from fastapi.responses import JSONResponse, FileResponse
 
     app = FastAPI(title="local-qwen3-asr", version="1.0")
     holder = {"model": None}
-    ACTIVITY = {"at": 0.0}
+    ACTIVITY = {"at": 0.0, "busy": 0}
     lock = threading.Lock()
     voice_dir = os.path.join(HERE, "voice")
     os.makedirs(voice_dir, exist_ok=True)
@@ -107,6 +132,73 @@ def build_app(loader, default_lang):
                     holder["model"] = loader()
                     sys.stderr.write("[asr-server] model loaded in %.1fs\n" % (time.time() - t0))
         return holder["model"]
+
+    def _watchdog():
+        while True:
+            time.sleep(5)
+            if not _pid_alive(parent_pid):
+                sys.stderr.write("[asr-server] parent %s gone -> exit\n" % parent_pid)
+                sys.stderr.flush()
+                os._exit(0)
+            if idle_s and holder["model"] is not None:
+                last = ACTIVITY["at"] or 0
+                if last and (time.time() - last) > idle_s:
+                    with lock:
+                        holder["model"] = None
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    sys.stderr.write("[asr-server] idle %ss -> model unloaded\n" % idle_s)
+                    sys.stderr.flush()
+
+    if parent_pid or idle_s:
+        threading.Thread(target=_watchdog, daemon=True).start()
+
+    @app.post("/unload")
+    def unload():
+        """只卸模型、不杀进程 —— 给"模型要干活，先把显存腾出来"用（2026-10-30）。
+
+        进程继续活着，所以下次用到不用冷启动；显存当场释放。
+        正在转写时不打断（长音频可能跑十几秒），回 busy 让调用方稍后重试。
+        """
+        if ACTIVITY["busy"] > 0:
+            return JSONResponse({"ok": False, "busy": True, "retry": 15}, status_code=409)
+        before = 0
+        before_free = None
+        try:
+            import torch
+            before = torch.cuda.memory_allocated()
+            before_free = torch.cuda.mem_get_info()[0]   # 驱动口径的可用显存，比分配器记账准
+        except Exception:  # noqa: BLE001
+            pass
+        with lock:
+            had = holder["model"] is not None
+            holder["model"] = None
+        freed = 0
+        if had:
+            try:
+                # 先 gc 再 empty_cache：对象没死时清缓存只释放"空闲块"。
+                import gc
+                gc.collect()
+                import torch
+                torch.cuda.empty_cache()
+                if before_free is not None:
+                    freed = max(0, torch.cuda.mem_get_info()[0] - before_free)
+                else:
+                    freed = max(0, before - torch.cuda.memory_allocated())
+            except Exception:  # noqa: BLE001
+                pass
+            sys.stderr.write("[asr-server] unload -> freed %d MB (driver view)\n" % (freed // 1048576))
+            sys.stderr.flush()
+        # device_map 加载的模型常被框架钩子引用住，卸完驱动侧往往只回一半；那就让进程退场，
+        # 所有者下次用到会重新拉起（冷启动约 5 s）。判据用驱动口径，不用分配器记账。
+        resp = {"ok": True, "unloaded": had, "freed_mb": int(freed // 1048576)}
+        if had and before > 0 and freed < before * 0.5:
+            resp["restart"] = True
+            threading.Timer(1.5, lambda: os._exit(0)).start()
+        return resp
 
     @app.get("/voice/{name}")
     def voice_file(name: str):
@@ -202,6 +294,7 @@ def build_app(loader, default_lang):
                          language: str = Form(default_lang), response_format: str = Form("json")):
         suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
         raw = await file.read()
+        ACTIVITY["busy"] += 1
         fd, path = tempfile.mkstemp(suffix=suffix, dir=os.environ.get("TEMP", "."))
         try:
             with os.fdopen(fd, "wb") as f:
@@ -243,6 +336,7 @@ def build_app(loader, default_lang):
             ACTIVITY["at"] = time.time()
             return JSONResponse({"text": text})
         finally:
+            ACTIVITY["busy"] = max(0, ACTIVITY["busy"] - 1)
             try:
                 os.unlink(path)
             except OSError:
@@ -258,6 +352,10 @@ def main():
     ap.add_argument("--port", type=int, default=18080)
     ap.add_argument("--language", default="Chinese", help="default language, 'auto' to detect")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="宿主插件 PID；它退出则本服务自杀（0 = 不管）")
+    ap.add_argument("--idle-unload", type=int, default=0,
+                    help="空闲 N 秒后卸载模型（0 = 常驻）")
     a = ap.parse_args()
 
     import torch
@@ -270,7 +368,8 @@ def main():
 
     sys.stderr.write("[asr-server] listening http://%s:%d (model loads on first request)\n"
                      % (a.host, a.port))
-    uvicorn.run(build_app(loader, a.language), host=a.host, port=a.port, log_level="warning")
+    uvicorn.run(build_app(loader, a.language, a.parent_pid, a.idle_unload),
+                host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":

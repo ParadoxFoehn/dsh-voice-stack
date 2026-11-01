@@ -13,6 +13,13 @@ const HEALTH = 'http://127.0.0.1:18082/health';
 const ENSURE = '/voice-player/ensure';
     const PLAY = 'http://127.0.0.1:18082';
 
+// 设置面板的兜底档位：宿主端点还没就绪（例如只热更了客户端半边）时，
+// 面板也要能打开并显示合理默认值，而不是点了没反应（2026-10-30 实测踩到）。
+const DEFAULT_CFG = {
+  asr: { mode: 'idle', idleSec: 120 },
+  tts: { mode: 'resident', idleSec: 120, device: 'cpu' },
+};
+
     // ---- 可调参数（想改就改这里，改完重启客户端生效）-----------------------------
     // 待发托盘最多攒几条。满了以后新录音会被拒绝并提示，避免一次塞太多条。
     const MAX_DRAFTS = 3;
@@ -24,7 +31,65 @@ const ENSURE = '/voice-player/ensure';
     const WARN_SECONDS = 20;
     // ---------------------------------------------------------------------------
 
-    function insertComposerText(text) {
+    // 与回收站插件（safe-delete-guard）同一套取色逻辑：先读客户端主题令牌，读不到再按
+// document.body 的底色判断明暗。区别是**底一律纯色**——白皮肤纯白、黑皮肤纯黑（用户 2026-10-30 定），
+// 不再用半透明灰，免得和背景混在一起发脏。
+function resolvePalette() {
+  let cs = null;
+  try { cs = getComputedStyle(document.documentElement); } catch { cs = null; }
+  const pick = (name) => {
+    try { return ((cs && cs.getPropertyValue(name)) || '').trim(); } catch { return ''; }
+  };
+  // 只认不透明的颜色：客户端很多容器是 rgba(0,0,0,0)，把 RGB 直接拿来算会把"浅色"误判成"黑色"。
+  const parse = (c) => {
+    if (!c) return null;
+    let m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/.exec(c);
+    if (m) {
+      const a = m[4] === undefined ? 1 : Number(m[4]);
+      if (a === 0) return null;
+      return [Number(m[1]), Number(m[2]), Number(m[3])];
+    }
+    m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+    if (m) {
+      return [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+    }
+    return null;
+  };
+  const luma = (rgb) => (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+
+  let dark = null;
+  // ① 主题令牌优先：切换皮肤时客户端会改这几个变量，最可靠
+  const token = parse(pick('--dsw-alias-bg-layer-1')) || parse(pick('--dsw-alias-bg-layer-2')) ||
+                parse(pick('--dsw-alias-bg-base'));
+  if (token) dark = luma(token) < 0.5;
+  // ② 往上找第一个不透明的实际背景色
+  if (dark === null) {
+    let el = document.body;
+    while (el && dark === null) {
+      try {
+        const bg = parse(getComputedStyle(el).backgroundColor);
+        if (bg) dark = luma(bg) < 0.5;
+      } catch { /* ignore */ }
+      el = el.parentElement;
+    }
+  }
+  // ③ 系统偏好兜底
+  if (dark === null) {
+    try { dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); } catch { dark = false; }
+  }
+
+  return {
+    dark,
+    bg: dark ? '#000000' : '#ffffff',
+    tint: dark ? 'rgba(255,255,255,.06)' : 'rgba(47,111,237,.06)',
+    text: pick('--dsw-alias-label-primary') || (dark ? '#f2f2f2' : '#15181d'),
+    sub: pick('--dsw-alias-label-tertiary') || (dark ? 'rgba(242,242,242,.62)' : 'rgba(21,24,29,.55)'),
+    line: pick('--dsw-alias-border-l1') || (dark ? 'rgba(255,255,255,.18)' : 'rgba(0,0,0,.12)'),
+    brand: pick('--dsw-alias-brand-primary') || (dark ? '#79a2f5' : '#2f6fed'),
+  };
+}
+
+function insertComposerText(text) {
       const el = document.querySelector('textarea') ||
         document.querySelector('[contenteditable="true"]');
       if (!el) return false;
@@ -67,10 +132,14 @@ const ENSURE = '/voice-player/ensure';
       return svg;
     }
     function makeVoiceBubble(secs, url, transcript) {
+      // 气泡卡跟着客户端明暗走：白皮肤白底黑字、黑皮肤黑底白字（用户 2026-10-30 定）。
+      // 原来是半透明蓝 rgba(127,179,232,.12)，在深色皮肤下会发灰、和背景糊在一起。
+      const th = resolvePalette();
       const box = document.createElement('div');
       box.setAttribute('data-voice-bubble', '1');
       box.style.cssText = 'display:inline-flex;flex-direction:column;gap:5px;padding:8px 12px;'
-        + 'border-radius:14px;border:1px solid rgba(128,128,128,.30);background:rgba(127,179,232,.12);max-width:420px';
+        + 'border-radius:14px;border:1px solid ' + th.line + ';background:' + th.bg + ';'
+        + 'color:' + th.text + ';max-width:420px';
       const head = document.createElement('div');
       head.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:11px;opacity:.72;letter-spacing:.06em';
       head.appendChild(waveIcon());
@@ -360,6 +429,53 @@ const ENSURE = '/voice-player/ensure';
       const chunksRef = React.useRef([]);
       const warnRef = React.useRef(null);
       const busyRef = React.useRef(false);
+
+      // ---- 语音服务：开关状态 + 档位（2026-10-30 新增）----------------------
+      // svcUp: null=未知 / false=未启动（按钮灰）/ true=已就绪
+      // 服务由宿主侧 services.js spawn 并托管，这里只负责"看一眼、点一下"。
+      const [svcUp, setSvcUp] = React.useState(null);
+      const [menu, setMenu] = React.useState(false);
+      const [panel, setPanel] = React.useState(false);
+      const [cfg, setCfg] = React.useState(DEFAULT_CFG);
+      // 菜单挂在按钮上方：位置由按钮的屏幕坐标算出来，不能用 fixed+bottom 蒙（会跑到屏幕右下角去）。
+      const [anchor, setAnchor] = React.useState(null);
+
+      const refreshSvc = React.useCallback(async () => {
+        try {
+          const r = await fetch('/voice-player/status', { cache: 'no-store' });
+          const d = await r.json();
+          const tts = (d.services || []).find((s) => s.name === 'tts');
+          setSvcUp(!!(tts && tts.up));
+          setCfg(d.config || DEFAULT_CFG);
+        } catch {
+          setSvcUp(false);
+          setCfg((c) => c || DEFAULT_CFG);
+        }
+      }, []);
+      React.useEffect(() => { refreshSvc(); }, [refreshSvc]);
+      React.useEffect(() => {
+        const t = setInterval(refreshSvc, 15000);
+        return () => clearInterval(t);
+      }, [refreshSvc]);
+
+      const svcAction = async (target, action) => {
+        setState(action === 'start' ? '正在启动语音服务…' : '正在关闭…');
+        try {
+          await fetch('/voice-player/service?target=' + target + '&action=' + action, { method: 'POST' });
+        } catch { /* 端点不在也继续，下面刷新会给出真实状态 */ }
+        await refreshSvc();
+        setState('');
+        setMenu(false);
+      };
+      const saveCfg = async (next) => {
+        setCfg(next);
+        try {
+          await fetch('/voice-player/settings', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(next),
+          });
+        } catch { /* ignore */ }
+      };
       // The composer slot carries the session id; keep it in module scope so the
       // delivery route can address THIS conversation instead of guessing.
       // SAFE DEGRADATION (for people who just downloaded the plugin): if the harness in front of
@@ -513,19 +629,55 @@ const ENSURE = '/voice-player/ensure';
         }
       };
 
+      // 菜单项与档位分段按钮的小工具（只在渲染时用，不进状态）
+      const th = resolvePalette();
+      const mbtn = (label, onClick) => h('button', {
+        onClick,
+        style: { display: 'block', width: '100%', textAlign: 'left', padding: '6px 9px',
+                 background: 'transparent', border: 0, borderRadius: 8, color: th.text,
+                 cursor: 'pointer', fontSize: 12 },
+      }, label);
+      const seg = (opts, cur, onPick) => h('div', { style: { display: 'flex', gap: 6, margin: '4px 0 9px' } },
+        opts.map(([val, label]) => h('button', {
+          key: String(val),
+          onClick: () => onPick(val),
+          style: { flex: 1, padding: '5px 0', borderRadius: 8, cursor: 'pointer', fontSize: 11.5,
+                   color: cur === val ? '#fff' : th.text,
+                   background: cur === val ? th.brand : 'transparent',
+                   border: '1px solid ' + (cur === val ? th.brand : th.line) },
+        }, label))
+      );
+      // 资源预估：显存按 ASR 加载态 + TTS(若 GPU)；内存按 TTS 位置 + ASR 常驻
+      const vramEst = 2.3 + (cfg && cfg.tts && cfg.tts.device === 'gpu' ? 2.3 : 0);
+      const ramEst = (cfg && cfg.tts && cfg.tts.device === 'gpu' ? 0.9 : 2.6) + 0.4;
+
       return h('div', {
         style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 2px', fontSize: 11.5,
                  color: 'inherit', opacity: 0.9 },
       },
         h('button', {
-          onClick: () => (rec ? stop() : start()),
+          // 服务没起来时，这一次点击的含义是"启动服务"，不是"录音"（用户 2026-10-30 定）。
+          onClick: () => {
+            if (rec) return stop();
+            if (svcUp === false) { setMenu(false); return svcAction('tts', 'start'); }
+            return start();
+          },
+          onContextMenu: (e) => {
+            e.preventDefault();
+            const r = e.currentTarget.getBoundingClientRect();
+            setAnchor({ left: Math.round(r.left), bottom: Math.round(window.innerHeight - r.top + 8) });
+            setMenu((v) => !v);
+            setPanel(false);
+          },
           disabled: busy && !rec,
-          title: (rec ? '结束录音' : '录一段语音发给小肥鱼（发的是语音本身）') + ' · v2 气泡',
+          title: rec ? '结束录音'
+            : svcUp === false ? '语音服务未启动 · 单击启动 · 右键更多'
+            : '录一段语音（右键：服务开关 / 设置）',
           'aria-label': 'voice message',
           style: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30,
                    borderRadius: '50%', cursor: 'pointer', padding: 0,
                    color: 'inherit', background: rec ? 'rgba(192,57,43,.18)' : 'transparent',
-                   opacity: busy && !rec ? 0.45 : 1,
+                   opacity: (busy && !rec) ? 0.45 : (svcUp === false ? 0.55 : 1),
                    border: '1px solid rgba(128,128,128,.45)' },
         },
           rec ? h('span', { style: { fontSize: 11, lineHeight: 1 } }, '■') : h('svg', {
@@ -541,13 +693,12 @@ const ENSURE = '/voice-player/ensure';
         state ? h('span', { style: { opacity: 0.65 } }, state) : null,
         drafts.length ? h('div', {
           'data-voice-dock': '1',
-          // Theme-neutral: translucent grey + inherited text colour, so it looks native in
-          // both the light and the dark client skin instead of imposing a dark panel.
+          // 与右键面板同一套取色：纯白/纯黑底 + 主题字色（原来是半透明灰，深色皮肤下发灰）。
           style: { position: 'fixed', right: 16, bottom: 82, zIndex: 2147482000, display: 'flex',
                    flexDirection: 'column', gap: 6, padding: '10px 12px', borderRadius: 14,
-                   minWidth: 268, maxHeight: '46vh', overflowY: 'auto', color: 'inherit',
-                   background: 'rgba(127,127,127,.10)', border: '1px solid rgba(128,128,128,.32)',
-                   boxShadow: '0 8px 22px rgba(0,0,0,.10)', fontSize: 12 },
+                   minWidth: 268, maxHeight: '46vh', overflowY: 'auto', color: th.text,
+                   background: th.bg, border: '1px solid ' + th.line,
+                   boxShadow: '0 10px 28px rgba(0,0,0,.18)', fontSize: 12 },
         },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                               fontSize: 11, opacity: 0.8, letterSpacing: '.06em' } },
@@ -578,6 +729,85 @@ const ENSURE = '/voice-player/ensure';
           }, '发送 ' + drafts.length + ' 条'),
           h('div', { style: { fontSize: 10, opacity: 0.5, lineHeight: 1.4, letterSpacing: '.02em' } },
             MAX_DRAFTS + ' 条 · ' + MAX_SECONDS + 's · 改法见 client.js')
+        ) : null,
+
+        // 右键菜单：开关服务 + 进设置（用户 2026-10-30 定）
+        menu ? h('div', {
+          style: { position: 'fixed', left: anchor ? anchor.left : 16, bottom: anchor ? anchor.bottom : 82,
+                   zIndex: 2147482002, minWidth: 200,
+                   padding: 6, borderRadius: 12, color: th.text, fontSize: 12,
+                   background: th.bg, border: '1px solid ' + th.line,
+                   boxShadow: '0 10px 28px rgba(0,0,0,.18)' },
+        },
+          h('div', { style: { padding: '5px 9px 6px', fontSize: 10.5, opacity: 0.62, letterSpacing: '.06em' } },
+            svcUp ? '语音服务：已就绪' : '语音服务：未启动'),
+          mbtn(svcUp ? '关闭语音服务' : '开启语音服务',
+            () => svcAction('tts', svcUp ? 'stop' : 'start')),
+          mbtn('设置…', () => { setMenu(false); setPanel(true); })
+        ) : null,
+
+        // 设置面板：TTS 两栏（驻留 / 位置）+ ASR 一栏（驻留）
+        panel && cfg ? h('div', {
+          style: { position: 'fixed', left: anchor ? anchor.left : 16, bottom: anchor ? anchor.bottom : 82,
+                   zIndex: 2147482003, width: 316,
+                   padding: '12px 14px', borderRadius: 14, color: th.text, fontSize: 12,
+                   background: th.bg, border: '1px solid ' + th.line,
+                   boxShadow: '0 10px 28px rgba(0,0,0,.18)', lineHeight: 1.55 },
+        },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+            h('span', { style: { fontWeight: 600, fontSize: 12.5 } }, '语音服务设置'),
+            h('button', {
+              onClick: () => setPanel(false),
+              style: { background: 'transparent', border: 0, color: 'inherit', opacity: 0.65,
+                       cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px' },
+            }, '×')
+          ),
+
+          h('div', { style: { opacity: 0.62, fontSize: 10.5, letterSpacing: '.06em', margin: '8px 0 2px' } },
+            'TTS · 说话'),
+          h('div', { style: { opacity: 0.8, fontSize: 11 } }, '驻留方式'),
+          seg([['resident', '常驻'], ['idle', '空闲卸载']],
+            cfg.tts.mode,
+            (v) => saveCfg({ ...cfg, tts: { ...cfg.tts, mode: v } })),
+          cfg.tts.mode === 'idle' ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, margin: '-4px 0 9px' } },
+            h('span', { style: { opacity: 0.7, fontSize: 11 } }, '空闲'),
+            h('input', {
+              type: 'number', min: 30, max: 3600, value: cfg.tts.idleSec,
+              onChange: (e) => saveCfg({ ...cfg, tts: { ...cfg.tts, idleSec: Number(e.target.value) || 120 } }),
+              style: { width: 64, padding: '3px 6px', borderRadius: 6, color: 'inherit',
+                       background: 'transparent', border: '1px solid rgba(128,128,128,.4)', fontSize: 11.5 },
+            }),
+            h('span', { style: { opacity: 0.7, fontSize: 11 } }, '秒后卸载')
+          ) : null,
+          h('div', { style: { opacity: 0.8, fontSize: 11 } }, '运行位置'),
+          seg([['gpu', 'GPU（2.3G 显存）'], ['cpu', 'CPU（2.6G 内存）']],
+            cfg.tts.device,
+            (v) => saveCfg({ ...cfg, tts: { ...cfg.tts, device: v } })),
+
+          h('div', { style: { opacity: 0.62, fontSize: 10.5, letterSpacing: '.06em', margin: '4px 0 2px' } },
+            'ASR · 听话'),
+          h('div', { style: { opacity: 0.8, fontSize: 11 } }, '驻留方式'),
+          seg([['resident', '常驻'], ['idle', '空闲卸载']],
+            cfg.asr.mode,
+            (v) => saveCfg({ ...cfg, asr: { ...cfg.asr, mode: v } })),
+          cfg.asr.mode === 'idle' ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, margin: '-4px 0 9px' } },
+            h('span', { style: { opacity: 0.7, fontSize: 11 } }, '空闲'),
+            h('input', {
+              type: 'number', min: 30, max: 3600, value: cfg.asr.idleSec,
+              onChange: (e) => saveCfg({ ...cfg, asr: { ...cfg.asr, idleSec: Number(e.target.value) || 120 } }),
+              style: { width: 64, padding: '3px 6px', borderRadius: 6, color: 'inherit',
+                       background: 'transparent', border: '1px solid rgba(128,128,128,.4)', fontSize: 11.5 },
+            }),
+            h('span', { style: { opacity: 0.7, fontSize: 11 } }, '秒后卸载')
+          ) : null,
+
+          h('div', { style: { borderTop: '1px solid rgba(128,128,128,.28)', marginTop: 4, paddingTop: 8,
+                              fontSize: 11, opacity: 0.85 } },
+            h('div', null, '预计占用　显存 ' + vramEst.toFixed(1) + ' G　内存 ' + ramEst.toFixed(1) + ' G'),
+            h('div', { style: { opacity: 0.7, marginTop: 3, fontSize: 10.5 } },
+              cfg.tts.device === 'cpu' ? '建议：CPU 与 GPU 同速，显存留给别的东西' : '建议：显存紧张时把 TTS 换到 CPU'),
+            h('div', { style: { opacity: 0.7, marginTop: 2, fontSize: 10.5 } }, '改动在重新开启服务后生效')
+          )
         ) : null
       );
     }
