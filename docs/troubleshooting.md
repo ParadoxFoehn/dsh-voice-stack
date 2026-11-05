@@ -77,6 +77,12 @@ v0.6.0 已修（`suppressed` 集合 + 只暂停不倒带）。
 所以水平居中、垂直掉下去。v0.6.0 已把面板搬到 `shell.overlay`（body 级浮层）。
 自己写浮层 UI 时同理：**别挂在输入框槽位里**。
 
+### 挂断后语音还在播
+播放侧不归通话管：一次性播放器是全局的，队列、`suppressed`、`<audio>` 元素都与通话状态无关，
+所以"挂断"以前只切了状态，声音照旧。
+v0.6.1 已修：挂断会调 `stopAllAudio()`（清队列 + 暂停所有 audio），并监听 `on` 的 true→false，
+覆盖宿主判挂与会话取消路径。仍复现就确认 `client.js` 里有 `stopAllAudio`。
+
 ### 悬浮条点不动、也拖不动
 它落在 Windows 顶端的窗口拖拽带里了（`-webkit-app-region: drag`，高度是
 `--dsh-windows-titlebar-height`）。Electron 会把那块的鼠标事件整个抢走，所以既点不了也拖不走。
