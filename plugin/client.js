@@ -1417,6 +1417,21 @@ function insertComposerText(text) {
         }, 300);
         return () => { live = false; clearInterval(listenTimer); clearInterval(hbTimer); };
       }, [ctx]);
+      // 挂断 / 打断共用：立刻停掉正在播的语音，连排队与后台合成中的后续组一起清掉。
+      // 2026-11-06 用户实测：挂断后语音还在播——挂断只断了通话状态，根本没碰播放队列。
+      const stopAllAudio = () => {
+        try { window.__voiceTransientClear && window.__voiceTransientClear(); } catch { /* ignore */ }
+        try {
+          document.querySelectorAll('audio').forEach((a) => { try { a.pause(); } catch { /* ignore */ } });
+        } catch { /* ignore */ }
+        callSpeaking = false;
+      };
+      // 任何一条路径挂断（按钮 / 宿主判挂 / 会话取消）都要闭嘴：盯着 on 的 true→false 跳变
+      const prevOnRef = React.useRef(on);
+      React.useEffect(() => {
+        if (prevOnRef.current && !on) stopAllAudio();
+        prevOnRef.current = on;
+      }, [on]);
       const interrupt = () => {
         // 只有我正在播报时才有效；其它时候点了什么都不做
         if (!callSpeaking) return;
@@ -1451,7 +1466,13 @@ function insertComposerText(text) {
         if (busy) return;
         if (on) {
           setBusy(true);
-          try { await callToggle(syncOn); } finally { setPhase('idle'); setBusy(false); }
+          try { await callToggle(syncOn); } finally {
+            // 挂断必须同时闭嘴：停播放、清队列、停后台组（2026-11-06）
+            stopAllAudio();
+            setPhase('idle');
+            setListen(false);
+            setBusy(false);
+          }
           return;
         }
         if (!svc) return;
