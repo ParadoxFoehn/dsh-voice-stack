@@ -1536,7 +1536,11 @@ function insertComposerText(text) {
       st.textContent = [
         // 位置：默认贴右上、落在顶栏下方（用户 2026-11-05：挂右下角太远，来回够不着）。
         // 拖一次就固定在拖到的地方（pos 状态），不会再被这里的默认值盖掉。
-        '.vcall-root{position:fixed;right:18px;top:64px;bottom:auto;z-index:2147483001;font-family:inherit;font-size:12px}',
+        // ⚠ Windows 顶端有一条 -webkit-app-region:drag 的窗口拖拽带，Electron 会把那里的
+        //   鼠标事件整个抢走——落进去就是"点不了也拖不动"（2026-11-05 实测踩到）。
+        //   所以：① 按标题栏高度往下让位；② 自己声明 no-drag，拖到哪都能点。
+        '.vcall-root{position:fixed;right:18px;top:calc(var(--dsh-windows-titlebar-height,64px) + 12px);bottom:auto;'
+          + 'z-index:2147483001;-webkit-app-region:no-drag;app-region:no-drag;font-family:inherit;font-size:12px}',
         '.vcall-bar{display:flex;align-items:stretch;height:36px;border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:999px;overflow:hidden;background:var(--dsw-alias-bg-overlay,#fff);box-shadow:0 6px 18px rgba(0,0,0,.12)}',
         '.vcall-cell{display:flex;align-items:center;gap:6px;padding:0 12px;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}',
         '.vcall-cell:hover{background:color-mix(in srgb,var(--dsw-alias-border-l1,#e5e7eb) 30%,transparent)}',

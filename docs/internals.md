@@ -108,6 +108,10 @@ agent 说话 → 宿主 index.js 分组建表 → TTS(18082) → mp3 落盘 ┘ 
 - **同一 TTS 实例不许并发**：会触发 `CUDA error: device-side assert`，整进程报废。
 - **不要退回"整篇合成完再播"**（干等）或"播完一组才合成下一组"（空等）。
 - **不要把浮层挂在输入框槽位**：那里有 `transform`，`position:fixed` 会错位。
+- **浮层不要落在窗口拖拽带里**：Windows 顶端 `--dsh-windows-titlebar-height` 高度内是
+  `-webkit-app-region: drag` 的窗口拖拽区，Electron 会把鼠标事件整个抢走——表现是**既点不了也拖不动**。
+  浮层要么按该高度往下让位（`top: calc(var(--dsh-windows-titlebar-height,64px) + 12px)`），
+  要么自己声明 `-webkit-app-region: no-drag`（2026-11-05 实测踩到）。
 - **不要让 agent 自己数 `voice-inbox.jsonl` 的行**：一律用 `voice_call_status` / `voice_wait`。
 
 ## 7. 日志怎么看（排查第一步）

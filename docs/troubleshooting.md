@@ -77,6 +77,12 @@ v0.6.0 已修（`suppressed` 集合 + 只暂停不倒带）。
 所以水平居中、垂直掉下去。v0.6.0 已把面板搬到 `shell.overlay`（body 级浮层）。
 自己写浮层 UI 时同理：**别挂在输入框槽位里**。
 
+### 悬浮条点不动、也拖不动
+它落在 Windows 顶端的窗口拖拽带里了（`-webkit-app-region: drag`，高度是
+`--dsh-windows-titlebar-height`）。Electron 会把那块的鼠标事件整个抢走，所以既点不了也拖不走。
+v0.6.0 已给它加了 `-webkit-app-region: no-drag`，并按标题栏高度往下让位。
+自己加浮层时同样要处理，否则用户只能重启。
+
 ## 资源相关
 
 ### `torch.OutOfMemoryError: CUDA out of memory`（明明显存看着还够）
