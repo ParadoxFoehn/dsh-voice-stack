@@ -2,7 +2,7 @@
 
 > 给**排查问题的人**看：这套东西为什么这么设计、坏的时候先看哪。
 > 使用流程本身在 [`plugin/使用说明.md`](../plugin/使用说明.md)，安装步骤在 [`INSTALL.md`](../INSTALL.md)。
-> 版本 v0.5.20 · 2026-11-05
+> 版本 v0.6.0 · 2026-11-05
 
 ## 1. 一页链路
 
@@ -81,7 +81,7 @@ agent 说话 → 宿主 index.js 分组建表 → TTS(18082) → mp3 落盘 ┘ 
 | --- | --- | --- |
 | 有标记但没有播放器 | `<GUI>/voice-player/bubble-report?all=1` 的 `count`，控制台 `window.__voiceDebug()` | 标记被正文包住 / 加了代码块 / 一条塞了两个标记 |
 | 点了播放没反应、随后变灰 | 播放地址 | 直连 18082 被 CSP 拦，改走 `/voice-player/audio` |
-| 只念前半句 | `next-group` 是否按 id 取组 | `recentVoices` 缺失（v0.5.20 前的 bug） |
+| 只念前半句 | `next-group` 是否按 id 取组 | `recentVoices` 缺失（v0.6.0 前的 bug） |
 | 打断后又从头念 | `suppressed` 是否写入、`currentTime` 是否被清零 | 同上 |
 | 判成"已挂断"但还在通话 | `voice_call_status` 的 `inCall`/`callId` | 读到了上一通的 `end`，或自己数行数判断 |
 | 用户说话被吞 | 播报时长 | 半双工：单条 >30 s 时麦克风关得太久 |

@@ -1,4 +1,4 @@
-# @local/dsh-voice-player · v0.5.20
+# @local/dsh-voice-player · v0.6.0
 
 > 语音消息 + 语音通话：让 agent 开口说话（`voice_say`），让用户录一段发出去，并提供一套本机语音服务（ASR + TTS）的生命周期管理。
 
