@@ -92,13 +92,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 
 ## 先别装在你的工作机上：请先在沙箱里试
 
-这套东西会**装两个 Python 环境、下载约 12 GB 模型、占用最多 10 GB 显存**，而且是"跟系统交互型"的（拉起进程、监听端口、改开机项）。作者只在**一台机器**（Windows + RTX 5090 Laptop 24 GB）上跑通过，没做过跨设备验证。
+这套东西会**装两个 Python 环境、下载数 GB 模型、占用 4–7 GB 显存（8 GB 卡可跑）**，而且是"跟系统交互型"的（拉起进程、监听端口、改开机项）。作者只在**一台机器**（Windows + RTX 5090 Laptop 24 GB）上跑通过，没做过跨设备验证。
 
 建议顺序：沙箱机 → 只跑 `verify.ps1` → 跑通再装插件。
 
 ## 已知限制
 
-- 只在 Windows + RTX 5090 Laptop（24 GB）实测；12 GB 以下需要换更小模型或走 CPU（见 `docs/HARDWARE-TIERS.md`）。
+- 只在 Windows + RTX 5090 Laptop（24 GB）实测；**默认两个 0.6B 合计约 4.6 GB 显存，8 GB 显卡即可全套常驻**，12 GB 以上可开双实例并行（见 `docs/HARDWARE-TIERS.md`）。
 - 单条录音上限 30 s；0.6B ASR 的硬边界约 60 s（`max_source_positions=1500`）。
 - `plugin/client.js` 已清理 0.1 时期的死代码（843 → 598 行），保留的只有当前链路：录音/托盘/气泡/一次性播放器。
 - 自动播放受浏览器策略约束：被拒时**静默失败**，消息里的白卡仍可点播。
