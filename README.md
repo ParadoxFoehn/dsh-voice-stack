@@ -1,7 +1,11 @@
-# 小肥鱼会说话了 · dsh-voice-stack（v0.3.0）
+# 小肥鱼会说话了 · dsh-voice-stack（v0.5.20）
 
 让桌面 AI 助手**有自己的嗓子、能听懂你的话、并且用"消息"的方式收发语音**：
 你按住说一句 → 它以气泡收下；它想回你 → **消息一到就开口说一次**，说完不再吵，想重听点卡片。
+也可以**直接打电话**：拨号后说一句转一句，它用语音回，随时可以打断。
+
+> **想直接上手 / 交给别人用 → 看 [`plugin/使用说明.md`](plugin/使用说明.md)**：
+> 一页版操作手册，开场前五件事 + 语音消息 / 语音通话两条流程 + 红线 + 排错 + 换机器清单。
 
 整套东西完全跑在**本机**：TTS、ASR、播放服务都是本地进程，音频不出机器。
 
@@ -26,7 +30,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `plugin/` | DSH 插件 `@local/dsh-voice-player`：宿主半边（`voice_say` 工具 + 5 个路由 + 三行回话规则）与 web 半边（声波按钮 / 待发托盘 / 气泡渲染 / 一次性播放器） |
+| `plugin/` | DSH 插件 `@local/dsh-voice-player`：宿主半边（`voice_say` / `voice_wait` / `voice_call_status` 三个工具 + 路由）与 web 半边（声波按钮 / 待发托盘 / 气泡渲染 / 一次性播放器 / 通话悬浮条 / 服务设置面板）。**操作手册见 `plugin/使用说明.md`** |
 | `tts/` | Qwen3-TTS 服务（18082）：整段 `/say`、流式 `/say-stream`、三种播放页、`/upload` 接用户录音、`/warm` 预热 |
 | `asr/` | Qwen3-ASR 服务（OpenAI 兼容 `/v1/audio/transcriptions`）：18083 快道（0.6B）/ 18080 长音（1.7B） |
 | `skill/speak/` | 技能 `speak`：怎么"用好"这把嗓子（服务检查 → 预热 → 说短话 → 文字补细节） |
@@ -44,6 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 
 # 2) 安装插件：把 plugin\ 加进 DSH profile（bundle @local/dsh-voice-player）
 # 3) 复制技能：skill\speak\ → <DSH_HOME>\.dsh\skills\speak\，然后重启客户端
+# 4) 读一遍 plugin\使用说明.md：两种模式怎么走、哪些不能做
 ```
 
 首次合成要加载模型（约 12.7 s）；`/warm` 之后，一句话 ≈ 时长 × 0.31–0.38 秒。
@@ -55,6 +60,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 | `MAX_DRAFTS` | `3` | 待发托盘最多攒几条，满了拒绝新录音并提示 |
 | `MAX_SECONDS` | `30` | 单条录音硬上限（秒），到点自动停止 |
 | `WARN_SECONDS` | `20` | 开始提示"偏长"（不打断） |
+
+另有运行时配置 `plugin/config.json`（首次启动自动生成，**不要打进包**）：
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `tts.device` | `gpu` | 后端档位：`gpu`（单实例，音色最稳）/ `gpu2`（双实例并行，段间音色可能略有差异）/ `cpu`（CosyVoice2，0 显存）/ `mix` |
+| `tts.mode` · `tts.idleSec` | `resident` · 240 | 常驻 / 空闲卸载（空闲多少秒后卸载模型） |
+| `asr.mode` · `asr.idleSec` | `idle` · 120 | 同上，ASR 侧 |
+| `call.silenceMs` | `2000` | 通话断句：最后一个字之后静音多久算说完（600–3500） |
+
+这些都建议**在悬浮条齿轮的面板里改**（改完重启服务生效），手改容易写坏格式。
 
 音色在 `tts/voice.json`（`mode: clone|design`、`instruct`、`ref`、`ref_text`），换嗓子见 `MODELS.md` §1。
 
@@ -71,11 +87,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1
 - **别用 `Set-Content -Encoding UTF8` 写配置**（会加 BOM，DSH 客户端直接起不来）。
 - **`<audio>` 标签会被消息渲染层过滤**：所以气泡里的播放器是插件**用 DOM 造出来的原生元素**，不是模型输出的 HTML。
 
-细节全在 [`docs/architecture.md`](docs/architecture.md) 与 [`docs/troubleshooting.md`](docs/troubleshooting.md)。
+细节全在 [`docs/architecture.md`](docs/architecture.md) 与 [`docs/troubleshooting.md`](docs/troubleshooting.md)；
+**出问题要排查 → 先看 [`docs/internals.md`](docs/internals.md)**（机制 + 先看哪 + 真实踩坑案例）。
 
 ## 先别装在你的工作机上：请先在沙箱里试
 
-这套东西会**装两个 Python 环境、下载约 12 GB 模型、常驻约 2.3 GB 显存**（0.3.0 起；旧版约 9–10 GB），而且是"跟系统交互型"的（拉起进程、监听端口、改开机项）。作者只在**一台机器**（Windows + RTX 5090 Laptop 24 GB）上跑通过，没做过跨设备验证。
+这套东西会**装两个 Python 环境、下载约 12 GB 模型、占用最多 10 GB 显存**，而且是"跟系统交互型"的（拉起进程、监听端口、改开机项）。作者只在**一台机器**（Windows + RTX 5090 Laptop 24 GB）上跑通过，没做过跨设备验证。
 
 建议顺序：沙箱机 → 只跑 `verify.ps1` → 跑通再装插件。
 

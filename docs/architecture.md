@@ -1,4 +1,4 @@
-# 架构（v0.2.0）
+# 架构（v0.5.20）
 
 > 一句话：**语音走消息流，不走输入框**。用户的话和助手的话都变成会话里的消息，音频用原生的 `<audio>` 播放；插件只负责"录制 / 合成 / 投递 / 播一次"四件事。
 
@@ -14,7 +14,8 @@
                                         │ HTTP（全部 127.0.0.1）
 ┌───────────────────────────────────────┴────────────────────────────────────────────────┐
 │  plugin/index.js（host 半边 · 跑在宿主进程）                                             │
-│    ├─ 工具 voice_say(text)          → 确保 TTS 在跑 → /say 整段合成 → 记录 lastVoice      │
+│    ├─ 工具 voice_say(text)          → 确保 TTS 在跑 → 按句分组建表 → 第一组立刻返回       │
+│    │                                  其余组后台合成；voice_wait / voice_call_status 管通话 │
 │    ├─ 路由 GET /voice-player/ensure        → 探活/拉起 TTS（WMI 脱离进程，无控制台）       │
 │    ├─ 路由 GET /voice-player/probe-send    → sessionController.prompt()（用户语音投递）    │
 │    ├─ 路由 GET /voice-player/last-voice    → 客户端轮询"刚合成的是哪个文件"                │
@@ -98,7 +99,10 @@
 | `/upload` | POST | 原始音频字节 → mp3（可选转写） |
 | `/voice-player/ensure` | GET | 拉起 TTS |
 | `/voice-player/probe-send?text=&sessionId=` | GET | 投递一条用户消息（`?probe=list` 可列会话） |
-| `/voice-player/last-voice` | GET | 客户端轮询用 |
+| `/voice-player/last-voice` | GET | 客户端轮询用（带最近 12 条 `history`，客户端自己排队连播） |
+| `/voice-player/next-group?voice=<id>` | GET | 取**这一条**语音的下一组；未合成好回 `pending`，各条按 id 独立，连发不会互相截断 |
+| `/voice-player/status` · `/service` · `/settings` | GET/POST | 服务状态 / 启动关闭 / 档位与驻留配置 |
+| `/voice-call/state` · `/voice-call/heartbeat` | GET/POST | 通话状态与心跳（客户端据此亮「聆听 / 忙线」） |
 | `/voice-player/bubble-report` | GET/POST | 自诊断（客户端上报，运维读取） |
 
 ## 5. 文件地图

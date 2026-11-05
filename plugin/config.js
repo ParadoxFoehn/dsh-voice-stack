@@ -11,10 +11,13 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FILE = path.join(HERE, 'config.json');
 
-/** 出厂默认：显存优先 —— ASR 走 GPU 空闲卸载，TTS 走 CPU 常驻（CPU 与 GPU 同速）。 */
+/** 出厂默认：TTS 走 GPU 常驻（Qwen3-TTS，热态约 1.2s/句）；ASR 空闲卸载，默认 240 秒。 */
 export const DEFAULTS = {
-  asr: { mode: 'idle', idleSec: 120 },                 // mode: 'resident' | 'idle'
-  tts: { mode: 'resident', idleSec: 120, device: 'cpu' }, // device: 'gpu' | 'cpu'
+  asr: { mode: 'idle', idleSec: 240 },                 // mode: 'resident' | 'idle'
+  tts: { mode: 'resident', idleSec: 240, device: 'gpu' }, // device: 'gpu' | 'gpu2' | 'cpu'
+  // 通话断句：最后一个字之后静音多久算「说完了」。2 秒是用户定调（2026-11-04），
+  // 调小会更灵敏但容易把一句话截成两半，调大更稳但等待更久。
+  call: { silenceMs: 2000 },
 };
 
 function clampInt(v, lo, hi, dflt) {
@@ -28,6 +31,7 @@ export function normalize(input) {
   const src = (input && typeof input === 'object') ? input : {};
   const asr = (src.asr && typeof src.asr === 'object') ? src.asr : {};
   const tts = (src.tts && typeof src.tts === 'object') ? src.tts : {};
+  const call = (src.call && typeof src.call === 'object') ? src.call : {};
   return {
     asr: {
       mode: asr.mode === 'resident' ? 'resident' : 'idle',
@@ -36,7 +40,10 @@ export function normalize(input) {
     tts: {
       mode: tts.mode === 'idle' ? 'idle' : 'resident',
       idleSec: clampInt(tts.idleSec, 30, 3600, DEFAULTS.tts.idleSec),
-      device: tts.device === 'gpu' ? 'gpu' : 'cpu',
+      device: tts.device === 'cpu' ? 'cpu' : (tts.device === 'gpu2' ? 'gpu2' : (tts.device === 'mix' ? 'mix' : 'gpu')),
+    },
+    call: {
+      silenceMs: clampInt(call.silenceMs, 600, 3500, DEFAULTS.call.silenceMs),
     },
   };
 }

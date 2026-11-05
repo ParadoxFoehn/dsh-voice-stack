@@ -90,6 +90,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register-startup.ps1
 
 ## 6. 第一次用
 
+- **先读 [`plugin/使用说明.md`](plugin/使用说明.md)**：两种模式（语音消息 / 语音通话）各自怎么走、哪些不能做，一页看完；
 - 第一次合成要加载模型，等 10–20 秒；
 - 之后一句话 1–3 秒；
 - 想让音色变成"你自己的"：录 3–5 秒 16 kHz 单声道 WAV，替换 `assets/prompt.wav`，并把 `config\config.json` 里的 `prompt_text` 改成那段录音的**准确原文**，重启服务。

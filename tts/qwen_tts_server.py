@@ -25,7 +25,14 @@ import subprocess
 import sys
 import threading
 import urllib.parse
+import re
 import time
+
+DEVICE = os.environ.get('QWEN_TTS_DEVICE', 'cpu')
+IDLE_STATE = {'seconds': 0}   # 运行时可通过 POST /idle 调整（0 = 常驻）
+FFMPEG = os.environ.get('DSH_FFMPEG') or r'D:\Harness工作区\tools\bin\ffmpeg.exe'
+if not os.path.exists(FFMPEG):
+    FFMPEG = 'ffmpeg'   # 别人的机器上没有这个路径时退回 PATH 里的 ffmpeg
 
 import numpy as np
 import soundfile as sf
@@ -69,6 +76,43 @@ STATE = {
 }
 LAST = {"text": "", "file": "", "mode": "", "instruct": "", "at": 0, "sec": 0.0}
 
+# 长句会让 GPU 上的克隆生成抛致命的 `CUDA error: device-side assert`，而且一次崩就
+# 把整个进程的 CUDA 上下文废掉（实测：22 字正常，36 字必崩，之后全部 500）。
+# 所以一律切成短句、逐条生成，再把音频按顺序拼回去。
+SENT_END = "。！？!?；;…"
+SOFT_END = "，,、：:"
+
+
+def split_for_tts(text, max_len=20):
+    """把文本切成不超过 max_len 字的短句，供逐句合成。"""
+    raw = re.split(r'(?<=[%s])' % SENT_END, (text or "").strip())
+    out = []
+    for piece in raw:
+        piece = piece.strip()
+        if not piece:
+            continue
+        if len(piece) <= max_len:
+            out.append(piece)
+            continue
+        buf = ""
+        for sub in re.split(r'(?<=[%s])' % SOFT_END, piece):
+            if not sub:
+                continue
+            if not buf or len(buf) + len(sub) <= max_len:
+                buf += sub
+            else:
+                out.append(buf)
+                buf = sub
+        if buf:
+            out.append(buf)
+    merged = []
+    for piece in out:
+        if merged and len(piece) <= 2 and len(merged[-1]) + len(piece) <= max_len + 4:
+            merged[-1] += piece
+        else:
+            merged.append(piece)
+    return merged or [text]
+
 
 def load_voice():
     try:
@@ -105,6 +149,7 @@ def _pid_alive(pid):
 
 
 def build_app(parent_pid=0, idle_s=0):
+    IDLE_STATE['seconds'] = int(idle_s or 0)
     """parent_pid：宿主插件进程，它一消失本服务自杀（不留孤儿、不占显存/内存）。
     idle_s：空闲多少秒后卸载模型（0 = 常驻）。TTS 在 CPU 上冷加载要 ~15 s，别设太小。"""
     from fastapi import FastAPI, Request
@@ -113,6 +158,7 @@ def build_app(parent_pid=0, idle_s=0):
     app = FastAPI(title="local-qwen3-tts", version="1.0")
     holder = {"base": None, "design": None}
     lock = threading.Lock()
+    gen_lock = threading.Lock()   # 合成必须串行：并发调用同一个模型会直接触发 CUDA assert
     os.makedirs(OUT, exist_ok=True)
     load_voice()
 
@@ -135,9 +181,9 @@ def build_app(parent_pid=0, idle_s=0):
                 sys.stderr.write("[qwen-tts] parent %s gone -> exit\n" % parent_pid)
                 sys.stderr.flush()
                 os._exit(0)
-            if idle_s and (holder["base"] is not None or holder["design"] is not None):
+            if IDLE_STATE['seconds'] and (holder["base"] is not None or holder["design"] is not None):
                 last = LAST.get("at") or 0
-                if last and (time.time() - last) > idle_s:
+                if last and (time.time() - last) > IDLE_STATE['seconds']:
                     with lock:
                         holder["base"] = None
                         holder["design"] = None
@@ -146,7 +192,7 @@ def build_app(parent_pid=0, idle_s=0):
                         torch.cuda.empty_cache()
                     except Exception:  # noqa: BLE001
                         pass
-                    sys.stderr.write("[qwen-tts] idle %ss -> model unloaded\n" % idle_s)
+                    sys.stderr.write("[qwen-tts] idle %ss -> model unloaded\n" % IDLE_STATE['seconds'])
                     sys.stderr.flush()
 
     if parent_pid or idle_s:
@@ -174,9 +220,23 @@ def build_app(parent_pid=0, idle_s=0):
                 "design_ready": holder["design"] is not None,
                 "lastUsed": LAST["at"], "voice": STATE}
 
+    @app.post("/idle")
+    async def set_idle(request: Request):
+        """运行时调整空闲卸载秒数（0 = 常驻），不需要重启服务。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        secs = int(body.get("idle_s", 0) or 0)
+        IDLE_STATE['seconds'] = secs
+        return {"ok": True, "idle_s": secs}
+
     @app.post("/unload")
     def unload():
-        """只卸模型、不杀进程 —— 给"模型要干活，先把显存腾出来"用（2026-10-30）。
+        """卸模型腾显存（2026-10-30）。
+
+        **注意**：显存释放不足时它会返回 restart:true 并在 1.5 秒后 os._exit(0) 退出进程，
+        调用方要把它当"可能死"处理——之后必须重新拉起服务（2026-11-03 故障报告 P2-1）。
 
         TTS 不设 busy 否决：单次合成约 2.5 秒，被打断的代价是这一次请求失败、用户重说一句，
         比"因为一次卡住就永远不让腾显存"划算。ASR 那边有否决（长音频要跑十几秒）。
@@ -239,6 +299,42 @@ def build_app(parent_pid=0, idle_s=0):
     def last():
         return LAST
 
+    def _synth_to_file(clean, use_mode, use_instruct, mp3):
+        """逐句生成、再按顺序拼接。
+
+        长句会让 GPU 上的克隆生成抛致命的 `CUDA error: device-side assert`
+        （实测 22 字正常、36 字必崩，且一次崩就把整个进程的 CUDA 上下文废掉），
+        所以每一句都是一次独立的短请求。
+        """
+        pieces = split_for_tts(clean)
+        model = get_model("design" if use_mode == "design" else "base")
+        sr = int(getattr(model, "sample_rate", 24000) or 24000)
+        chunks = []
+        for sent in pieces:
+            if use_mode == "design":
+                audio_list, sr = model.generate_voice_design(text=sent, language="Chinese",
+                                                             instruct=use_instruct)
+            else:
+                audio_list, sr = model.generate_voice_clone(text=sent, language="Chinese",
+                                                            ref_audio=STATE["ref"],
+                                                            ref_text=STATE["ref_text"])
+            chunks.append(np.concatenate([np.asarray(a).squeeze() for a in audio_list])
+                          if len(audio_list) > 1 else np.asarray(audio_list[0]).squeeze())
+        seq = []
+        for c in chunks:
+            seq.append(np.asarray(c, dtype=np.float32))
+            seq.append(np.zeros(int(sr * 0.12), dtype=np.float32))
+        audio = np.concatenate(seq) if len(seq) > 1 else seq[0]
+        wav = mp3 + ".wav"
+        sf.write(wav, audio, sr)
+        subprocess.run([FFMPEG, "-y", "-v", "error", "-i", wav, "-codec:a", "libmp3lame",
+                        "-b:a", "96k", mp3], check=True, capture_output=True, creationflags=NO_WINDOW)
+        try:
+            os.remove(wav)
+        except OSError:
+            pass
+        return len(audio) / float(sr)
+
     @app.get("/say")
     def say(text: str, mode: str = "", instruct: str = ""):
         clean = (text or "").strip()[:800]
@@ -251,26 +347,8 @@ def build_app(parent_pid=0, idle_s=0):
         mp3 = os.path.join(OUT, "qwen-%s.mp3" % digest)
         if not os.path.isfile(mp3):
             t0 = time.time()
-            if use_mode == "design":
-                model = get_model("design")
-                audio_list, sr = model.generate_voice_design(text=clean, language="Chinese",
-                                                             instruct=use_instruct)
-            else:
-                model = get_model("base")
-                audio_list, sr = model.generate_voice_clone(text=clean, language="Chinese",
-                                                            ref_audio=STATE["ref"],
-                                                            ref_text=STATE["ref_text"])
-            audio = np.concatenate([np.asarray(a).squeeze() for a in audio_list]) \
-                if len(audio_list) > 1 else np.asarray(audio_list[0]).squeeze()
-            wav = mp3 + ".wav"
-            sf.write(wav, audio, sr)
-            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-codec:a", "libmp3lame",
-                            "-b:a", "96k", mp3], check=True, capture_output=True, creationflags=NO_WINDOW)
-            try:
-                os.remove(wav)
-            except OSError:
-                pass
-            sec = len(audio) / float(sr)
+            with gen_lock:
+                sec = _synth_to_file(clean, use_mode, use_instruct, mp3)
             LAST.update({"sec": round(sec, 2), "wall": round(time.time() - t0, 2)})
             sys.stderr.write("[qwen-tts] %s %d chars -> %.1fs audio in %.1fs\n"
                              % (use_mode, len(clean), sec, time.time() - t0))
@@ -302,7 +380,7 @@ def build_app(parent_pid=0, idle_s=0):
         with open(src, "wb") as f:
             f.write(raw)
         if not os.path.isfile(mp3):
-            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-ar", "16000", "-ac", "1",
+            subprocess.run([FFMPEG, "-y", "-v", "error", "-i", src, "-ar", "16000", "-ac", "1",
                             "-codec:a", "libmp3lame", "-b:a", "64k", mp3],
                            check=True, capture_output=True, creationflags=NO_WINDOW)
         sec = 0.0

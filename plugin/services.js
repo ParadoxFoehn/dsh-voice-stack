@@ -13,9 +13,11 @@
  * 所以单纯 kill 父 pid 杀不干净 —— 必须 `taskkill /T` 连树一起杀。
  */
 import { spawn } from 'node:child_process';
+import * as config from './config.js';
 
 const HEALTH_TIMEOUT = 1200;
 const START_TIMEOUT = 40000;   // TTS 在 CPU 上冷加载约 15 s，留足余量
+const SECOND_TTS_PORT = 18083; // GPU×2 模式的第二个 Qwen3-TTS 实例
 
 /** 端口与入口都集中在这里，改一处即可。 */
 const SPEC = {
@@ -78,25 +80,63 @@ export async function start(name, tier) {
     await stop(name);
   }
 
-  const args = spec.args.slice();
-  if (tier && tier.mode === 'idle') {
-    args.push('--idle-unload', String(tier.idleSec || 120));
-  }
-  // 父进程看门狗：本进程一消失，服务自己退出，不留孤儿。
-  args.push('--parent-pid', String(process.pid));
-
+  // TTS 两套后端：GPU 档 = Qwen3-TTS（18082，显存 2.3G）；CPU 档 = CosyVoice2（同一端口，克隆音色，0 显存）。
+  let cmd = spec.cmd;
+  let args = spec.args.slice();
   const env = { ...process.env };
   if (name === 'tts' && tier && tier.device === 'cpu') {
-    env.CUDA_VISIBLE_DEVICES = '';                  // 让 torch 看不到显卡 → 走 CPU
+    env.CUDA_VISIBLE_DEVICES = '';                  // 让 torch 看不到显卡 → CosyVoice2 走 CPU
+    cmd = 'D:\\py-tts\\.venv\\Scripts\\python.exe';
+    args = ['D:\\py-tts\\tts_server.py', '--port', String(spec.port),
+            '--prompt', 'D:\\py-tts\\assets\\voice-me.wav',
+            '--prompt-text', '这个声音定下来了。以后我说话，就是这个嗓子。'];
   }
+  if (tier && tier.mode === 'idle' && name !== 'tts') {
+    args.push('--idle-unload', String(tier.idleSec || 120));
+  }
+  // 父进程看门狗：本进程一消失，服务自己退出，不留孤儿。（CosyVoice2 不认这个参数，跳过）
+  if (name !== 'tts') args.push('--parent-pid', String(process.pid));
 
   try {
-    const proc = spawn(spec.cmd, args, {
-      cwd: spec.cwd, env, windowsHide: true, stdio: 'ignore', detached: false,
+    // 日志落盘：后台起服务时 stderr 会被丢掉，排障时看不到任何报错。
+    // 这里把 stdout/stderr 追加写进 D:\\py-tts\\logs\\<service>-service.log。
+    let stdioOpt = 'ignore';
+    try {
+      const fsMod = await import('node:fs');
+      const pathMod = await import('node:path');
+      const logDir = 'D:\\py-tts\\logs';
+      await fsMod.promises.mkdir(logDir, { recursive: true });
+      const fd = fsMod.openSync(pathMod.join(logDir, name + '-service.log'), 'a');
+      stdioOpt = ['ignore', fd, fd];
+    } catch { stdioOpt = 'ignore'; }
+    const proc = spawn(cmd, args, {
+      cwd: spec.cwd, env, windowsHide: true, stdio: stdioOpt, detached: false,
     });
     proc.on('exit', () => RUNNING.delete(name));
     proc.on('error', () => RUNNING.delete(name));
     RUNNING.set(name, { proc, pid: proc.pid });
+    // GPU×2 / CPU+GPU 混合：再起一个 18083 实例（gpu2 = 第二个 Qwen3；mix = CosyVoice2 走 CPU）
+    if (name === 'tts' && tier && (tier.device === 'gpu2' || tier.device === 'mix')) {
+      try {
+        let secondCmd = cmd;
+        let secondArgs = args.map((a) => (a === String(spec.port) ? String(SECOND_TTS_PORT) : a));
+        let secondEnv = env;
+        if (tier.device === 'mix') {
+          // 混合加速：第二实例用 CosyVoice2 在 CPU 上跑（同一个参考音色，尽量接近）
+          secondCmd = 'D:\\py-tts\\.venv\\Scripts\\python.exe';
+          secondArgs = ['D:\\py-tts\\tts_server.py', '--port', String(SECOND_TTS_PORT),
+                        '--prompt', 'D:\\py-tts\\assets\\voice-me.wav',
+                        '--prompt-text', '这个声音定下来了。以后我说话，就是这个嗓子。'];
+          secondEnv = { ...process.env, CUDA_VISIBLE_DEVICES: '' };
+        }
+        const second = spawn(secondCmd, secondArgs, {
+          cwd: spec.cwd, env: secondEnv, windowsHide: true, stdio: 'ignore', detached: false,
+        });
+        RUNNING.set('tts2', { proc: second, pid: second.pid });
+        second.on('exit', () => RUNNING.delete('tts2'));
+        second.on('error', () => RUNNING.delete('tts2'));
+      } catch { /* 第二实例起不来不影响主实例 */ }
+    }
   } catch {
     return false;
   }
@@ -114,6 +154,14 @@ export async function stop(name) {
   const entry = RUNNING.get(name);
   RUNNING.delete(name);
   if (entry) await killTree(entry.pid);
+  // GPU×2 的第二个实例跟着主实例一起停
+  if (name === 'tts') {
+    const second = RUNNING.get('tts2');
+    RUNNING.delete('tts2');
+    if (second) await killTree(second.pid);
+    const pid2 = await pidOnPort(SECOND_TTS_PORT);
+    if (pid2) await killTree(pid2);
+  }
   // 兜底：如果它是在别处起的（例如老的 guard），按端口找到再杀一次。
   if (await alive(name)) {
     const pid = await pidOnPort(SPEC[name].port);
@@ -148,16 +196,32 @@ export async function stopAll() {
 }
 
 export function status() {
+  let ttsDevice = 'gpu';
+  try { ttsDevice = config.load().tts.device || 'gpu'; } catch { /* 读不到按 gpu */ }
   return Promise.all(Object.keys(SPEC).map(async (name) => {
     const base = { name, port: SPEC[name].port };
+    let model = '';
+    let vramGb = 0;
+    if (name === 'tts') {
+      model = ttsDevice === 'cpu' ? 'CosyVoice2 0.5B（CPU）' : 'Qwen3-TTS 0.6B（GPU）';
+      vramGb = ttsDevice === 'cpu' ? 0 : 2.3;
+    } else if (name === 'asr') {
+      model = 'Qwen3-ASR 0.6B（GPU）';
+      vramGb = 2.3;
+    }
     try {
       const res = await fetch(healthUrl(name), { signal: AbortSignal.timeout(HEALTH_TIMEOUT) });
-      if (!res.ok) return { ...base, up: false, loaded: false };
+      if (!res.ok) return { ...base, up: false, loaded: false, model, vramGb, device: name === 'tts' ? ttsDevice : 'gpu' };
       const j = await res.json().catch(() => ({}));
       // ASR 的 /health 给 ready，TTS 给 base_ready/design_ready —— 统一成一个 loaded 位。
-      return { ...base, up: true, loaded: !!(j.ready || j.base_ready || j.design_ready) };
+      return {
+        ...base, up: true,
+        loaded: !!(j.ready || j.base_ready || j.design_ready),
+        model, vramGb, device: name === 'tts' ? ttsDevice : 'gpu',
+        second: name === 'tts' && ttsDevice === 'gpu2' ? SECOND_TTS_PORT : 0,
+      };
     } catch {
-      return { ...base, up: false, loaded: false };
+      return { ...base, up: false, loaded: false, model, vramGb, device: name === 'tts' ? ttsDevice : 'gpu' };
     }
   }));
 }

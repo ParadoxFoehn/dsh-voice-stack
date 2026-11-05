@@ -1,7 +1,14 @@
 {
   "name": "@local/dsh-voice-player",
-  "version": "0.3.0",
+  "version": "0.5.20",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ParadoxFoehn/dsh-voice-stack.git",
+    "directory": "plugin"
+  },
+  "homepage": "https://github.com/ParadoxFoehn/dsh-voice-stack",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -9,13 +16,27 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "client.js", "services.js", "config.js", "cordis.patch.yml", "locale/*.json", "icon.svg"],
+  "files": [
+    "index.js",
+    "client.js",
+    "services.js",
+    "config.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "使用说明.md"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
-  }
+  },
+  "description": "语音消息 + 语音通话：录音气泡、独立通话悬浮条（服务/拨号/打断）、TTS 四档后端（GPU / CPU / GPU×2 / CPU+GPU 混合），通话文件按会话隔离（calls/<sessionId>/），附 voice_call_status / voice_wait 两个工具。"
 }

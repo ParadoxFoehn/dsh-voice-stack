@@ -62,6 +62,21 @@ iframe/HTML **必须包在 `<div id="vcp-root">` 里**，消息渲染层才认�
 ### 播放器和正文粘在一起
 播放器容器要有下外边距（本包技能里写的是 `margin: 10px 0 18px`），并在播放器后空一行再写正文。
 
+### 只念前半句，后半句没了
+长文本按「每 2 句一组」拆成多个 mp3，一组播完客户端来取下一组。**旧版的 `/voice-player/next-group`
+只服务最新那一条**：agent 连发几条时，前一条剩下的组被判 `stale` 直接丢掉。
+v0.5.20 已修（`recentVoices`：id → 分组表，保留最近 10 条）。仍复现就确认 `plugin/index.js` 里有这个 Map。
+
+### 点了「打断」，它又从头念一遍
+旧版打断只清队列、停音频，没把片段记成"已播"；客户端每 1.2 s 一次的轮询又把它捡回来重播，
+而且 `interrupt()` 里的 `currentTime = 0` 会把"打断"变成"从头再来"。
+v0.5.20 已修（`suppressed` 集合 + 只暂停不倒带）。
+
+### 设置面板跑到屏幕下方、还被截断
+`position:fixed` 认的是**最近的带 transform 的祖先**。面板原先挂在 `conversation.input.left` 槽位里，
+所以水平居中、垂直掉下去。v0.5.20 已把面板搬到 `shell.overlay`（body 级浮层）。
+自己写浮层 UI 时同理：**别挂在输入框槽位里**。
+
 ## 资源相关
 
 ### `torch.OutOfMemoryError: CUDA out of memory`（明明显存看着还够）
